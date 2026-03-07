@@ -83,6 +83,15 @@ export async function resolveAppId(
 }
 
 /**
+ * Resolve a numeric application ID to its name string.
+ * Returns the numeric ID as a string fallback if name cannot be found.
+ */
+export async function resolveAppName(appId: number): Promise<string> {
+  const apps = await getApplicationsList();
+  return apps.find((a) => a.id === appId)?.name ?? String(appId);
+}
+
+/**
  * Invalidate the cached applications list.
  */
 export function clearAppCache(): void {

@@ -76,6 +76,29 @@ export async function appdPost<T = unknown>(
 }
 
 /**
+ * Make an authenticated POST request with multipart/form-data.
+ * Used for servlet endpoints that expect a file upload (e.g. CustomDashboardImportExportServlet).
+ * Content-Type header is intentionally omitted so axios sets it with the correct multipart boundary.
+ */
+export async function appdPostFormData<T = unknown>(
+  path: string,
+  formData: FormData
+): Promise<T> {
+  const token = await getAccessToken();
+  const baseUrl = getBaseUrl();
+
+  const response = await axios({
+    method: "POST",
+    url: `${baseUrl}${path}`,
+    data: formData,
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: API_TIMEOUT_MS,
+  });
+
+  return response.data as T;
+}
+
+/**
  * Make an authenticated DELETE request to the AppDynamics REST API.
  */
 export async function appdDelete<T = unknown>(path: string): Promise<T> {

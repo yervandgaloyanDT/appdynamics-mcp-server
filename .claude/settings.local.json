@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"D:\\\\TEMP\\\\AppD-MCP-2026\\\\tempAppD-MCP-2026appdynamics-mcp-server\" && npx eslint src/ 2>&1)",
+      "WebSearch",
+      "Bash(npx tsc:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(node:*)",
+      "Bash(APPD_URL=https://experience.saas.appdynamics.com APPD_CLIENT_NAME=mcpV2 APPD_CLIENT_SECRET=REDACTED-ROTATED-SECRET APPD_ACCOUNT_NAME=experience npx tsx:*)",
+      "Bash(npm run:*)"
+    ]
+  }
+}

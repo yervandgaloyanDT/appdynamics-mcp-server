@@ -96,6 +96,20 @@ src/
 - All API calls go through `services/api-client.ts` for consistent auth and error handling
 - Dashboard APIs use `/restui/` endpoints (not the standard `/rest/` prefix)
 
+### Dashboard Widget Format Systems
+
+AppDynamics has **two distinct widget formats** — do not mix them:
+
+| | Export format | RESTUI format |
+|---|---|---|
+| Used by | `auto_build`, `import`, `save_file` | `create`, `update`, `add_widget` |
+| Widget type field | `widgetType: "AdvancedGraph"` | `type: "TIMESERIES_GRAPH"` |
+| Metrics field | `dataSeriesTemplates[]` | `widgetsMetricMatchCriterias[]` |
+| Endpoint | `POST /controller/CustomDashboardImportExportServlet` | `POST /controller/restui/dashboards/createDashboard` |
+| Top-level key | `widgetTemplates` | `widgets` |
+
+`buildExportWidgetPayload()` produces export format; `buildWidgetPayload()` produces RESTUI format.
+
 ## Guidelines
 
 - Always update this file and README.md when adding new tools or fixing bugs

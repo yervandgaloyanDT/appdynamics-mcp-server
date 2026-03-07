@@ -1,23 +1,29 @@
 /**
- * Dashboard tools: list, get, create, update, clone, delete, export.
+ * Dashboard tools: list, get, create, update, clone, delete, export, import, auto-build.
  * Full CRUD for AppDynamics custom dashboards.
  *
- * Widget format matches the AppDynamics restui API:
- *   - Types: TIMESERIES_GRAPH, METRIC_VALUE, HEALTH_LIST, TEXT, PIE, GAUGE, ANALYTICS
- *   - Metrics use widgetsMetricMatchCriterias[] (not dataSeriesTemplateMap)
- *   - Colors are integers (e.g. 16777215 = white), not hex strings
- *   - Canvas type: CANVAS_TYPE_GRID with grid-unit positioning
+ * Two widget format systems:
+ *   - Export format: used by auto-build/import/save-file
+ *       widgetType: "GraphWidget", metrics in dataSeriesTemplates
+ *       Import via POST /controller/CustomDashboardImportExportServlet
+ *   - RESTUI format: used by create/update/add-widget
+ *       type: "TIMESERIES_GRAPH", metrics in widgetsMetricMatchCriterias
+ *       Via POST /controller/restui/dashboards/createDashboard|updateDashboard
+ *
+ *   Colors are integers (e.g. 16777215 = white), not hex strings.
+ *   Canvas type: CANVAS_TYPE_GRID with grid-unit positioning.
  */
 
 import { writeFile } from "fs/promises";
 import { resolve } from "path";
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { appdGet, appdGetRaw, appdPost } from "../services/api-client.js";
+import { appdGet, appdGetRaw, appdPost, appdPostFormData } from "../services/api-client.js";
 import { handleError, textResponse } from "../utils/error-handler.js";
 import { truncateIfNeeded } from "../utils/formatting.js";
 import type { BusinessTransaction, Dashboard, DashboardSummary, HealthRule, Tier } from "../types.js";
-import { resolveAppId } from "../utils/app-resolver.js";
+import { resolveAppId, resolveAppName } from "../utils/app-resolver.js";
 
 // ── Color Helpers ─────────────────────────────────────────────────────────────
 
@@ -275,34 +281,54 @@ Returns: The created dashboard object with its new ID.`,
     },
     async ({ name, description, height, width, widgets, template }) => {
       try {
-        const dashboardPayload = {
-          name,
-          description: description ?? null,
-          height: height ?? 768,
-          width: width ?? 1024,
-          canvasType: "CANVAS_TYPE_GRID",
-          templateEntityType: "APPLICATION_COMPONENT_NODE",
-          minimized: false,
-          color: COLOR_LIGHT_GRAY,
-          backgroundColor: COLOR_LIGHT_GRAY,
-          template: template ?? false,
-          warRoom: false,
-          disabled: false,
-          refreshInterval: 120000,
-          minutesBeforeAnchorTime: -1,
-          startTime: -1,
-          endTime: -1,
-          layoutType: "",
-          properties: [],
-          widgets: (widgets ?? []).map((w, i) => buildWidgetPayload(w, i)),
-        };
-
-        const created = await appdPost<Dashboard>(
-          "/controller/restui/dashboards/createDashboard",
-          dashboardPayload
+        // Deduplicate app IDs that need name resolution
+        const idsToResolve = [...new Set(
+          (widgets ?? [])
+            .filter(w => w.applicationId !== undefined && !w.applicationName)
+            .map(w => w.applicationId!)
+        )];
+        const idToName = new Map<number, string>();
+        await Promise.all(
+          idsToResolve.map(async (id) => {
+            idToName.set(id, await resolveAppName(id));
+          })
         );
 
-        return textResponse(JSON.stringify(created, null, 2));
+        // Apply resolved names to widgets that need it
+        const resolvedWidgets: WidgetInput[] = (widgets ?? []).map(w => {
+          if (w.applicationId !== undefined && !w.applicationName) {
+            return { ...w, applicationName: idToName.get(w.applicationId) ?? String(w.applicationId) };
+          }
+          return w;
+        });
+
+        // Build export-format payload and import via servlet
+        const exportWidgets = resolvedWidgets.map((w, i) => buildExportWidgetPayload(w, i));
+        const exportPayload = {
+          ...buildExportDashboardEnvelope(name, description ?? null, height ?? 768, width ?? 1024, exportWidgets),
+          ...(template ? { template: true } : {}),
+        };
+
+        const newId = await importViaServlet(exportPayload, name);
+
+        // Bind metric criteria via RESTUI two-step approach.
+        if (newId != null) {
+          try {
+            await bindMetricWidgets(
+              newId,
+              resolvedWidgets.filter(
+                (w) => w.metricPath !== undefined && w.applicationId !== undefined,
+              ),
+            );
+          } catch {
+            // Non-fatal: dashboard exists, widgets may show no data
+          }
+        }
+
+        return textResponse(
+          `Dashboard "${name}" created successfully` +
+          (newId != null ? ` (ID: ${newId}).` : `. ID unknown — check appd_get_dashboards.`)
+        );
       } catch (error) {
         return handleError(error);
       }
@@ -341,22 +367,64 @@ Returns: The updated dashboard object.`,
           `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
         );
 
+        // Resolve app names for widgets that need them
+        let resolvedWidgets: WidgetInput[] | undefined;
+        if (widgets !== undefined) {
+          const idsToResolve = [...new Set(
+            widgets
+              .filter(w => w.applicationId !== undefined && !w.applicationName)
+              .map(w => w.applicationId!)
+          )];
+          const idToName = new Map<number, string>();
+          await Promise.all(
+            idsToResolve.map(async id => { idToName.set(id, await resolveAppName(id)); })
+          );
+          resolvedWidgets = widgets.map(w =>
+            w.applicationId !== undefined && !w.applicationName
+              ? { ...w, applicationName: idToName.get(w.applicationId) ?? String(w.applicationId) }
+              : w
+          );
+        }
+
+        // Step 1: Update dashboard properties + new widgets WITHOUT inline metric criteria.
+        // New widgets need server-assigned IDs/GUIDs before criteria can reference them.
         const updated = {
-          ...existing,
+          ...(existing as unknown as Record<string, unknown>),
           ...(name !== undefined && { name }),
           ...(description !== undefined && { description }),
           ...(height !== undefined && { height }),
           ...(width !== undefined && { width }),
-          ...(widgets !== undefined && {
-            widgets: widgets.map((w, i) => buildWidgetPayload(w, i)),
+          ...(resolvedWidgets !== undefined && {
+            widgets: resolvedWidgets.map((w, i) => ({
+              ...buildWidgetPayload(w, i),
+              id: 0,
+              version: 0,
+              guid: randomUUID(),
+              dashboardId,
+              widgetsMetricMatchCriterias: null,
+            })),
           }),
         };
 
-        const result = await appdPost<Dashboard>(
-          "/controller/restui/dashboards/updateDashboard",
-          updated
-        );
+        await appdPost<Dashboard>("/controller/restui/dashboards/updateDashboard", updated);
 
+        // Step 2: Bind metric criteria using server-assigned widget IDs/GUIDs.
+        if (resolvedWidgets !== undefined) {
+          const metricWidgets = resolvedWidgets.filter(
+            w => w.metricPath !== undefined && w.applicationId !== undefined
+          );
+          if (metricWidgets.length > 0) {
+            try {
+              await bindMetricWidgets(dashboardId, metricWidgets);
+            } catch {
+              // Non-fatal: dashboard updated, widgets may show no data
+            }
+          }
+        }
+
+        const result = await appdGetRaw<Dashboard>(
+          `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
+        );
         return textResponse(JSON.stringify(result, null, 2));
       } catch (error) {
         return handleError(error);
@@ -402,20 +470,56 @@ Returns: The updated dashboard with the new widget added.`,
         const existingWidgets = existing.widgets ?? [];
         const newWidgetIndex = existingWidgets.length;
 
-        const updated = {
-          ...existing,
-          widgets: [
-            ...existingWidgets,
-            buildWidgetPayload(widget, newWidgetIndex),
-          ],
+        // Step 1: Add widget WITHOUT metric criteria.
+        // The RESTUI API crashes (500) when adding a new widget (id=0) with metric criteria,
+        // because the criteria must reference the server-assigned widgetId and widgetGuid.
+        const widgetGuid = randomUUID();
+        const basePayload = {
+          ...buildWidgetPayload(widget, newWidgetIndex),
+          id: 0,
+          version: 0,
+          guid: widgetGuid,
+          dashboardId,
+          widgetsMetricMatchCriterias: null,
         };
 
-        const result = await appdPost<Dashboard>(
+        const step1 = await appdPost<Dashboard>(
           "/controller/restui/dashboards/updateDashboard",
-          updated
+          { ...existing, widgets: [...existingWidgets, basePayload] }
         );
 
-        return textResponse(JSON.stringify(result, null, 2));
+        // Step 2: If metric widget, bind criteria using the server-assigned id/guid.
+        if (widget.metricPath && widget.applicationId) {
+          type W = Record<string, unknown>;
+          const addedWidget = (step1.widgets as W[] | undefined)?.find(
+            (w) => (w["guid"] as string) === widgetGuid || w["title"] === widget.title
+          );
+          if (addedWidget?.["id"] && addedWidget?.["guid"]) {
+            const criteria = buildResuiMetricSeries(
+              widget,
+              addedWidget["id"] as number,
+              addedWidget["guid"] as string,
+              dashboardId,
+            );
+            if (criteria) {
+              const step2Dash = await appdGetRaw<Dashboard>(
+                `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
+              );
+              const step2Widgets = ((step2Dash.widgets as W[]) ?? []).map((w) =>
+                w["id"] === addedWidget["id"]
+                  ? { ...w, widgetsMetricMatchCriterias: criteria }
+                  : w
+              );
+              const step2 = await appdPost<Dashboard>(
+                "/controller/restui/dashboards/updateDashboard",
+                { ...step2Dash, widgets: step2Widgets }
+              );
+              return textResponse(JSON.stringify(step2, null, 2));
+            }
+          }
+        }
+
+        return textResponse(JSON.stringify(step1, null, 2));
       } catch (error) {
         return handleError(error);
       }
@@ -452,7 +556,26 @@ Returns: The newly created dashboard with its new ID.`,
         );
 
         const { id: _id, ...cloneData } = source;
-        const clonePayload = { ...cloneData, name: newName };
+
+        // Zero out widget IDs/GUIDs so AppDynamics creates fresh widgets
+        // (keeping source widget IDs causes conflicts when createDashboard runs)
+        type CW = Record<string, unknown>;
+        type CC = Record<string, unknown>;
+        const srcWidgets = (cloneData as Record<string, unknown>)["widgets"] as CW[] | undefined;
+        const clonePayload = {
+          ...cloneData,
+          name: newName,
+          widgets: srcWidgets?.map(w => ({
+            ...w,
+            id: 0,
+            version: 0,
+            guid: randomUUID(),
+            dashboardId: 0,
+            widgetsMetricMatchCriterias: (w["widgetsMetricMatchCriterias"] as CC[] | null | undefined)
+              ?.map(c => ({ ...c, id: 0, version: 0, widgetId: 0, widgetGuid: null, dashboardId: 0 }))
+              ?? null,
+          })) ?? [],
+        };
 
         const created = await appdPost<Dashboard>(
           "/controller/restui/dashboards/createDashboard",
@@ -555,7 +678,7 @@ Returns: The created dashboard name and ID.`,
     async ({ applicationName, dashboardName, focus = "comprehensive", timeRangeMinutes = 60 }) => {
       try {
         const appId = await resolveAppId(applicationName);
-        const appName = applicationName;
+        const appName = await resolveAppName(appId);
 
         const needsBTs = focus === "comprehensive" || focus === "performance";
         const needsTiers = focus === "comprehensive" || focus === "infrastructure";
@@ -574,7 +697,7 @@ Returns: The created dashboard name and ID.`,
           needsHealth
             ? appdGet<HealthRule[]>(
                 `/controller/rest/applications/${appId}/policy/health-rules`
-              )
+              ).catch(() => [] as HealthRule[])
             : Promise.resolve([] as HealthRule[]),
         ]);
 
@@ -623,6 +746,7 @@ Returns: The created dashboard name and ID.`,
             title: g.title,
             metricPath: g.metric,
             applicationId: appId,
+            applicationName: appName,
             width: 4,
             height: 3,
             x: i * 4,
@@ -656,6 +780,7 @@ Returns: The created dashboard name and ID.`,
             title: v.title,
             metricPath: v.metric,
             applicationId: appId,
+            applicationName: appName,
             width: 3,
             height: 2,
             x: i * 3,
@@ -688,6 +813,8 @@ Returns: The created dashboard name and ID.`,
               title: bt.name,
               metricPath: `Business Transaction Performance|Business Transactions|${bt.tierName}|${bt.name}|Average Response Time (ms)`,
               applicationId: appId,
+              applicationName: appName,
+              btIds: [bt.id],
               width: w,
               height: 2,
               x: btX,
@@ -720,6 +847,7 @@ Returns: The created dashboard name and ID.`,
               title: `${tier.name} - Response Time`,
               metricPath: `Overall Application Performance|${tier.name}|Average Response Time (ms)`,
               applicationId: appId,
+              applicationName: appName,
               width: i === n - 1 ? baseW + extra : baseW,
               height: 3,
               x: i * baseW,
@@ -746,6 +874,7 @@ Returns: The created dashboard name and ID.`,
             type: "HEALTH_LIST",
             title: "Health Rules Status",
             applicationId: appId,
+            applicationName: appName,
             entityType: "APPLICATION",
             width: 12,
             height: 4,
@@ -755,50 +884,45 @@ Returns: The created dashboard name and ID.`,
           y += 4;
         }
 
-        // ── Compose full dashboard definition in memory ───────────────────────
+        // ── Build export-format payload and POST to the import servlet ─────────
         const canvasHeight = Math.max(768, y * 60 + 60);
-        const builtWidgets = widgets.map((w, i) => buildWidgetPayload(w, i));
 
-        const shell = {
-          name: dashName,
-          description: `Auto-generated ${focus} dashboard for ${appName}`,
-          height: canvasHeight,
-          width: 1024,
-          canvasType: "CANVAS_TYPE_GRID",
-          templateEntityType: "APPLICATION_COMPONENT_NODE",
-          minimized: false,
-          color: COLOR_LIGHT_GRAY,
-          backgroundColor: COLOR_LIGHT_GRAY,
-          template: false,
-          warRoom: false,
-          disabled: false,
-          refreshInterval: 120000,
+        // Build widgets in export format (same format as appd_save_dashboard_file)
+        const exportWidgets = widgets.map((w, i) => buildExportWidgetPayload(w, i));
+
+        // Wrap in export envelope then override timeRange with user's preference
+        const exportPayload = {
+          ...buildExportDashboardEnvelope(
+            dashName,
+            `Auto-generated ${focus} dashboard for ${appName}`,
+            canvasHeight,
+            1024,
+            exportWidgets
+          ),
           minutesBeforeAnchorTime: timeRangeMinutes,
-          startTime: -1,
-          endTime: -1,
-          layoutType: "",
-          properties: [],
-          widgets: [] as unknown[],
         };
 
-        // ── Import pattern: create shell → fetch canonical object → add widgets
-        const created = await appdPost<Dashboard>(
-          "/controller/restui/dashboards/createDashboard",
-          shell
-        );
+        const newId = await importViaServlet(exportPayload, dashName);
 
-        const createdId = (created as { id?: number }).id;
-        const fetched = await appdGetRaw<Dashboard>(
-          `/controller/restui/dashboards/dashboardIfUpdated/${createdId}/-1`
-        );
-
-        await appdPost<Dashboard>(
-          "/controller/restui/dashboards/updateDashboard",
-          { ...fetched, height: canvasHeight, widgets: builtWidgets }
-        );
+        // Bind metric criteria via RESTUI two-step approach.
+        // The import servlet creates widgets (assigning ids/guids) but drops metric bindings.
+        // We re-fetch and bind BT_AFFECTED_EMC criteria to each metric widget.
+        if (newId != null) {
+          try {
+            await bindMetricWidgets(
+              newId,
+              widgets.filter(
+                (w) => w.metricPath !== undefined && w.applicationId !== undefined,
+              ),
+            );
+          } catch {
+            // Non-fatal: dashboard exists, widgets may show no data
+          }
+        }
 
         return textResponse(
-          `Dashboard "${dashName}" created successfully (ID: ${createdId ?? "unknown"}).`
+          `Dashboard "${dashName}" created successfully` +
+          (newId != null ? ` (ID: ${newId}).` : `. ID unknown — check appd_get_dashboards.`)
         );
       } catch (error) {
         return handleError(error);
@@ -917,68 +1041,17 @@ Returns: The newly created dashboard with its new ID.`,
           );
         }
 
-        // Extract the widget array — handles both real export format
-        // (widgetTemplates) and RESTUI internal format (widgets).
-        const importedWidgets = Array.isArray(parsed.widgetTemplates)
-          ? (parsed.widgetTemplates as Record<string, unknown>[])
-          : Array.isArray(parsed.widgets)
-          ? (parsed.widgets as Record<string, unknown>[])
-          : [];
+        // Pass the full JSON directly to the import servlet.
+        // Remove any stale id so AppDynamics creates fresh instead of overwriting.
+        const finalPayload: Record<string, unknown> = { ...parsed };
+        if (dashboardName) finalPayload["name"] = dashboardName;
+        delete finalPayload["id"];
 
-        // ── Step 1: Create a blank dashboard with correct metadata ───────────
-        // Posting the raw export JSON to createDashboard causes a 400 because
-        // the export format differs from the restui create format.
-        // We create a minimal blank shell first, then attach the widgets.
-        const blankPayload = {
-          name: resolvedName,
-          description:
-            typeof parsed.description === "string"
-              ? parsed.description
-              : null,
-          height:
-            typeof parsed.height === "number" ? parsed.height : 768,
-          width:
-            typeof parsed.width === "number" ? parsed.width : 1024,
-          canvasType: "CANVAS_TYPE_GRID",
-          templateEntityType: "APPLICATION_COMPONENT_NODE",
-          minimized: false,
-          color: COLOR_LIGHT_GRAY,
-          backgroundColor: COLOR_LIGHT_GRAY,
-          template: false,
-          warRoom: false,
-          disabled: false,
-          refreshInterval: 120000,
-          minutesBeforeAnchorTime: -1,
-          startTime: -1,
-          endTime: -1,
-          layoutType: "",
-          properties: [],
-          widgets: [],
-        };
-
-        const created = await appdPost<Dashboard>(
-          "/controller/restui/dashboards/createDashboard",
-          blankPayload
-        );
-
-        // ── Step 2: Fetch authoritative object, then restore widgets ─────────
-        const newId = (created as { id?: number }).id;
-        const fetched = await appdGetRaw<Dashboard>(
-          `/controller/restui/dashboards/dashboardIfUpdated/${newId}/-1`
-        );
-
-        await appdPost<Dashboard>(
-          "/controller/restui/dashboards/updateDashboard",
-          {
-            ...fetched,
-            height: blankPayload.height,
-            width: blankPayload.width,
-            widgets: importedWidgets,
-          }
-        );
+        const newId = await importViaServlet(finalPayload, resolvedName);
 
         return textResponse(
-          `Dashboard "${resolvedName}" imported successfully (ID: ${newId ?? "unknown"}).`
+          `Dashboard "${resolvedName}" imported successfully` +
+          (newId != null ? ` (ID: ${newId}).` : `. ID unknown — check appd_get_dashboards.`)
         );
       } catch (error) {
         return handleError(error);
@@ -1110,8 +1183,10 @@ interface WidgetInput {
   metricPath?: string;
   entityType?: string;
   text?: string;
+  label?: string;
   description?: string;
   adqlQuery?: string;
+  btIds?: number[];
 }
 
 // ── Export Format Builders ────────────────────────────────────────────────────
@@ -1119,16 +1194,16 @@ interface WidgetInput {
 // export a dashboard via the UI — suitable for save_dashboard_file and import.
 
 const EXPORT_TYPE_MAP: Record<string, string> = {
-  TIMESERIES_GRAPH: "AdvancedGraph",
-  METRIC_VALUE: "MetricValue",
+  TIMESERIES_GRAPH: "GraphWidget",
+  METRIC_VALUE: "MetricLabelWidget",
   HEALTH_LIST: "HealthListWidget",
   TEXT: "TextWidget",
   PIE: "PieWidget",
   GAUGE: "GaugeWidget",
   ANALYTICS: "AnalyticsWidget",
   // pass-through if already in export class-name form
-  AdvancedGraph: "AdvancedGraph",
-  MetricValue: "MetricValue",
+  GraphWidget: "GraphWidget",
+  MetricLabelWidget: "MetricLabelWidget",
   HealthListWidget: "HealthListWidget",
   TextWidget: "TextWidget",
   PieWidget: "PieWidget",
@@ -1174,17 +1249,17 @@ function buildExportWidgetPayload(w: WidgetInput, index: number): Record<string,
     borderThickness: 0,
     borderColor: COLOR_BORDER,
     backgroundAlpha: 1,
-    showValues: true,
-    formatNumber: null,
+    showValues: false,
+    formatNumber: true,
     numDecimals: 0,
-    removeZeros: null,
+    removeZeros: true,
     compactMode: false,
     showTimeRange: false,
     renderIn3D: false,
     showLegend: null,
     legendPosition: null,
     legendColumnCount: null,
-    timeRangeSpecifierType: "BEFORE_NOW",
+    timeRangeSpecifierType: "UNKNOWN",
     startTime: null,
     endTime: null,
     minutesBeforeAnchorTime: 15,
@@ -1254,50 +1329,90 @@ function buildExportWidgetPayload(w: WidgetInput, index: number): Record<string,
     return base;
   }
 
-  // ── Metric-based widgets (GaugeWidget, AdvancedGraph, MetricValue, PieWidget) ──
+  // ── HealthListWidget ──────────────────────────────────────────────────────
+  if (widgetType === "HealthListWidget") {
+    const appName = w.applicationName ?? String(w.applicationId ?? "");
+    base.applicationReference = null;
+    base.entityReferences = appName ? [{
+      applicationName: appName,
+      entityType: "APPLICATION",
+      entityName: appName,
+      scopingEntityType: null,
+      scopingEntityName: null,
+      subtype: null,
+      uniqueKey: null,
+    }] : [];
+    base.entityType = w.entityType ?? "POLICY";
+    base.entitySelectionType = "ALL";
+    base.iconSize = 18;
+    base.iconPosition = "LEFT";
+    base.showSearchBox = false;
+    base.showList = true;
+    base.showListHeader = false;
+    base.showBarPie = true;
+    base.showPie = false;
+    base.showCurrentHealthStatus = false;
+    base.innerRadius = 0;
+    base.aggregationType = "RATIO";
+    return base;
+  }
+
+  // ── Metric-based widgets (GaugeWidget, GraphWidget, MetricLabelWidget, PieWidget) ──
   if (w.metricPath) {
     const appName = w.applicationName ?? String(w.applicationId ?? "");
-    // inputMetricPath mirrors the metric browser tree path with "||" separators
-    // and a "Root||Applications||AppName||" prefix — matches the real export format.
+    // inputMetricPath uses || separators with Root||Applications||AppName|| prefix.
     const inputMetricPath =
       `Root||Applications||${appName}||` + w.metricPath.replace(/\|/g, "||");
+
+    // Determine metricType and entityType based on the metric path prefix.
+    // AppDynamics export format only accepts specific metricType enum values.
+    const isBT = w.metricPath.startsWith("Business Transaction Performance");
+    const metricType = isBT ? "BUSINESS_TRANSACTION" : "OVERALL_APPLICATION";
+    const entityType = isBT ? "BUSINESS_TRANSACTION" : "APPLICATION";
+    const evaluationScopeType = isBT ? "TIER_AVERAGE" : null;
 
     base.dataSeriesTemplates = [
       {
         seriesType: "LINE",
-        metricType: "METRIC_DATA",
+        metricType,
         showRawMetricName: false,
         colorPalette: null,
         name: `Series ${index}`,
         metricMatchCriteriaTemplate: {
-          entityMatchCriteria: null,
+          entityMatchCriteria: {
+            matchCriteriaType: "SpecificEntities",
+            entityType,
+            agentTypes: null,
+            entityNames: [],
+            summary: false,
+          },
           metricExpressionTemplate: {
-            metricExpressionType: "Absolute",
+            metricExpressionType: "Logical",
             functionType: "VALUE",
-            displayName: "null",
+            displayName: null,
             inputMetricText: false,
             inputMetricPath,
-            metricPath: w.metricPath,
-            scopeEntity: {
-              applicationName: appName,
-              entityType: "APPLICATION",
-              entityName: appName,
-              scopingEntityType: null,
-              scopingEntityName: null,
-              subtype: null,
-            },
+            relativeMetricPath: w.metricPath,
           },
           rollupMetricData: true,
           expressionString: "",
           useActiveBaseline: false,
           sortResultsAscending: false,
           maxResults: 20,
-          evaluationScopeType: null,
+          evaluationScopeType,
           baselineName: null,
           applicationName: appName,
-          metricDisplayNameStyle: "DISPLAY_STYLE_CUSTOM",
-          metricDisplayNameCustomFormat: "${m}",
-          includeHistoricalNodes: false,
+          metricDisplayNameStyle: "DISPLAY_STYLE_AUTO",
+          metricDisplayNameCustomFormat: null,
+          includeHistoricalNodes: null,
+          includeAbove: null,
+          includeBelow: null,
+          includeBoth: null,
+          includeBand12: null,
+          includeBand23: null,
+          includeBand34: null,
+          includeBand45: null,
+          includeShade: null,
         },
         axisPosition: null,
       },
@@ -1314,11 +1429,35 @@ function buildExportWidgetPayload(w: WidgetInput, index: number): Record<string,
     base.invertColors = false;
   }
 
-  if (widgetType === "AdvancedGraph") {
+  if (widgetType === "MetricLabelWidget") {
+    base.label = w.label ?? "${v}";
+    base.text = null;
+    base.textAlign = "RIGHT";
+    base.margin = 15;
+    base.showLabel = false;
+    base.showBaseline = false;
+    base.useBaselineColor = false;
+    base.reverseBaselineColorOrder = false;
+  }
+
+  if (widgetType === "GraphWidget") {
     base.showValues = false;
     base.showLegend = true;
     base.legendPosition = "POSITION_BOTTOM";
     base.legendColumnCount = 1;
+    base.verticalAxisLabel = null;
+    base.hideHorizontalAxis = null;
+    base.horizontalAxisLabel = null;
+    base.axisType = "LINEAR";
+    base.stackMode = null;
+    base.multipleYAxis = null;
+    base.customVerticalAxisMin = null;
+    base.customVerticalAxisMax = null;
+    base.showEvents = null;
+    base.interpolateDataGaps = false;
+    base.showAllTooltips = null;
+    base.staticThresholdList = [];
+    base.eventFilterTemplate = null;
   }
 
   return base;
@@ -1344,7 +1483,7 @@ function buildExportDashboardEnvelope(
     properties: null,
     templateEntityType: "APPLICATION_COMPONENT_NODE",
     associatedEntityTemplates: null,
-    timeRangeSpecifierType: "GLOBAL",
+    timeRangeSpecifierType: "UNKNOWN",
     minutesBeforeAnchorTime: -1,
     startDate: null,
     endDate: null,
@@ -1361,6 +1500,58 @@ function buildExportDashboardEnvelope(
   };
 }
 
+// ── Import Servlet Helper ─────────────────────────────────────────────────────
+
+/**
+ * POST an export-format dashboard JSON to the AppDynamics import servlet.
+ * Returns the new dashboard ID (or null if it cannot be determined).
+ * Three-tier fallback: direct id field → array response → name-based list lookup.
+ */
+async function importViaServlet(
+  exportJson: Record<string, unknown>,
+  dashName: string
+): Promise<number | null> {
+  // The import servlet expects a multipart/form-data upload (like a browser file picker),
+  // not a JSON body. Sending Content-Type: application/json returns HTTP 500.
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([JSON.stringify(exportJson)], { type: "application/json" }),
+    "dashboard.json"
+  );
+
+  const response = await appdPostFormData<unknown>(
+    "/controller/CustomDashboardImportExportServlet",
+    form
+  );
+
+  // Tier 1: response is { id: N } or { dashboardId: N } or { dashboard: { id: N } }
+  if (response !== null && typeof response === "object" && !Array.isArray(response)) {
+    const r = response as Record<string, unknown>;
+    if (typeof r["id"] === "number") return r["id"];
+    if (typeof r["dashboardId"] === "number") return r["dashboardId"];
+    // Actual AppDynamics servlet response: { success: true, dashboard: { id: N, ... } }
+    const nested = r["dashboard"];
+    if (nested !== null && typeof nested === "object" && !Array.isArray(nested)) {
+      const n = nested as Record<string, unknown>;
+      if (typeof n["id"] === "number") return n["id"];
+    }
+  }
+  // Tier 2: response is [{ id: N, ... }]
+  if (Array.isArray(response) && response.length > 0) {
+    const first = response[0] as Record<string, unknown>;
+    if (typeof first["id"] === "number") return first["id"];
+  }
+  // Tier 3: list all dashboards and find by exact name
+  const dashboards = await appdGetRaw<DashboardSummary[]>(
+    "/controller/restui/dashboards/getAllDashboardsByType/false"
+  );
+  const found = Array.isArray(dashboards)
+    ? dashboards.find((d) => d.name === dashName)
+    : undefined;
+  return found?.id ?? null;
+}
+
 // ── RESTUI Format Builder ─────────────────────────────────────────────────────
 
 /**
@@ -1374,7 +1565,9 @@ function buildWidgetPayload(
   // Map friendly type aliases to actual API types
   const typeMap: Record<string, string> = {
     AdvancedGraph: "TIMESERIES_GRAPH",
+    GraphWidget: "TIMESERIES_GRAPH",
     MetricValue: "METRIC_VALUE",
+    MetricLabelWidget: "METRIC_VALUE",
     HealthListWidget: "HEALTH_LIST",
     TextWidget: "TEXT",
     PieWidget: "PIE",
@@ -1418,7 +1611,7 @@ function buildWidgetPayload(
     minHeight: 0,
     minWidth: 0,
     widgetsMetricMatchCriterias: null,
-    timeRangeSpecifierType: "UNKNOWN",
+    timeRangeSpecifierType: "BEFORE_NOW",
     startTime: null,
     endTime: null,
     customTimeRange: null,
@@ -1545,4 +1738,137 @@ function buildWidgetPayload(
   }
 
   return base;
+}
+
+// ── RESTUI Metric Binding Helpers ─────────────────────────────────────────────
+
+/**
+ * Build a widgetsMetricMatchCriterias entry for RESTUI updateDashboard.
+ * Uses BT_AFFECTED_EMC (the only valid AEMC type accepted by the RESTUI API).
+ * type="ALL" for aggregate metrics, type="SPECIFIC" with btIds for per-BT.
+ * IMPORTANT: widgetId and widgetGuid must come from the server-assigned values
+ * after a widget is saved — not from a client-generated placeholder.
+ */
+function buildResuiMetricSeries(
+  w: WidgetInput,
+  widgetId: number,
+  widgetGuid: string,
+  dashboardId: number,
+): unknown[] | null {
+  if (!w.metricPath || !w.applicationId) return null;
+  const segments = w.metricPath.split("|");
+  const logicalMetricName = segments[segments.length - 1] ?? w.metricPath;
+  const hasSpecificBTs = w.btIds && w.btIds.length > 0;
+  return [
+    {
+      id: 0,
+      version: 0,
+      name: "Series 0",
+      nameUnique: true,
+      widgetGuid,
+      widgetId,
+      dashboardId,
+      seriesType: "LINE",
+      axisPosition: "LEFT",
+      showRawMetricName: false,
+      colorPalette: null,
+      metricType: "BUSINESS_TRANSACTION",
+      metricMatchCriteria: {
+        applicationId: w.applicationId,
+        affectedEntityMatchCriteria: {
+          aemcType: "BT_AFFECTED_EMC",
+          type: hasSpecificBTs ? "SPECIFIC" : "ALL",
+          componentIds: [],
+          componentMatchCriteria: null,
+          missingEntities: null,
+          inverseOnSpecificEntities: false,
+          businessTransactionIds: hasSpecificBTs ? w.btIds! : [],
+          nameMatch: null,
+          btTagInfoMatchCriteria: null,
+        },
+        evaluationScopeType: "TIER_AVERAGE",
+        metricExpression: {
+          type: "LEAF_METRIC_EXPRESSION",
+          literalValueExpression: false,
+          literalValue: 0,
+          metricDefinition: {
+            type: "LOGICAL_METRIC",
+            logicalMetricName,
+            scope: null,
+            metricId: 0,
+          },
+          functionType: "VALUE",
+          displayName: null,
+          inputMetricText: false,
+          inputMetricPath: `Root||` + w.metricPath.replace(/\|/g, "||"),
+          extractedAppIdsFromAnalyticsMetric: null,
+          value: 0,
+        },
+        rollupMetricData: true,
+        expressionString: "",
+        metricDisplayNameStyle: "DISPLAY_STYLE_AUTO",
+        metricDisplayNameCustomFormat: null,
+        metricDataFilter: { sortResultsAscending: false, maxResults: 20 },
+        useActiveBaseline: false,
+        baselineId: 0,
+        includeAbove: false,
+        includeBelow: false,
+        includeBoth: false,
+        includeBand12: false,
+        includeBand23: false,
+        includeBand34: false,
+        includeBand45: false,
+        includeShade: false,
+        isIncludeAllInactiveServers: false,
+        includeHistoricalNodes: false,
+        excludeMaintenanceWindow: false,
+        missingEntities: null,
+      },
+    },
+  ];
+}
+
+/**
+ * After importing a dashboard via servlet (which drops all metric bindings),
+ * fetch the RESTUI representation (to get server-assigned widget ids/guids),
+ * then bind metric criteria to each metric widget via a single updateDashboard call.
+ * Non-fatal: swallows errors so the dashboard is still returned to the caller.
+ */
+async function bindMetricWidgets(
+  dashId: number,
+  metricWidgets: WidgetInput[],
+): Promise<void> {
+  const toUpdate = metricWidgets.filter(
+    (w) => w.metricPath !== undefined && w.applicationId !== undefined,
+  );
+  if (toUpdate.length === 0) return;
+
+  const widgetByTitle = new Map<string, WidgetInput>();
+  for (const w of toUpdate) widgetByTitle.set(w.title, w);
+
+  const dash = await appdGetRaw<Record<string, unknown>>(
+    `/controller/restui/dashboards/dashboardIfUpdated/${dashId}/-1`,
+  );
+  const dashWidgets = (dash["widgets"] as Array<Record<string, unknown>>) ?? [];
+
+  let hasChanges = false;
+  const updatedWidgets = dashWidgets.map((w) => {
+    const input = widgetByTitle.get(w["title"] as string);
+    if (!input) return w;
+    const criteria = buildResuiMetricSeries(
+      input,
+      w["id"] as number,
+      w["guid"] as string,
+      dashId,
+    );
+    if (!criteria) return w;
+    hasChanges = true;
+    return { ...w, widgetsMetricMatchCriterias: criteria };
+  });
+
+  if (!hasChanges) return;
+  await appdPost("/controller/restui/dashboards/updateDashboard", {
+    ...dash,
+    widgets: updatedWidgets,
+  });
 }
