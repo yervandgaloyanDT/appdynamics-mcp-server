@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-AppDynamics MCP Server — a Model Context Protocol server that exposes AppDynamics SaaS REST API data to MCP-compatible clients (Cursor, Claude Desktop, etc.). Provides 23 tools covering application monitoring, diagnostics, metric browsing, full dashboard CRUD, auto-build dashboards, dashboard import/export/file-save, and automated root cause analysis.
+AppDynamics MCP Server — a Model Context Protocol server that exposes AppDynamics SaaS REST API data to MCP-compatible clients (Cursor, Claude Desktop, etc.). Provides 27 tools covering application monitoring, diagnostics, metric browsing, full dashboard CRUD, auto-build dashboards, dashboard import/export/file-save, health rule CRUD, and automated root cause analysis.
 
 ## Running
 
@@ -24,14 +24,15 @@ src/
 ├── constants.ts          # Shared constants (timeouts, defaults, limits)
 ├── services/
 │   ├── auth.ts           # OAuth2 token management with caching
-│   └── api-client.ts     # Shared HTTP client (appdGet, appdPost, appdDelete, appdGetRaw)
+│   └── api-client.ts     # Shared HTTP client (appdGet, appdPost, appdPut, appdDelete, appdGetRaw)
 ├── utils/
 │   ├── error-handler.ts  # Centralized error → MCP response conversion
 │   ├── app-resolver.ts   # Application name → ID resolver with cache
 │   └── formatting.ts     # Response truncation, timestamp formatting, tables
 └── tools/
     ├── applications.ts        # appd_get_applications
-    ├── health-rules.ts        # appd_get_health_rules
+    ├── health-rules.ts        # appd_get_health_rules, appd_create_health_rule, appd_update_health_rule,
+    │                          # appd_delete_health_rule, appd_enable_health_rule
     ├── health-violations.ts   # appd_get_health_violations
     ├── anomalies.ts           # appd_get_anomalies
     ├── business-transactions.ts # appd_get_business_transactions
@@ -65,12 +66,12 @@ src/
 - Token cached with 5-minute safety margin before expiry
 - **Fallback**: Direct API key if only `APPD_CLIENT_NAME` is set (no secret)
 
-### Tools Summary (23 total)
+### Tools Summary (27 total)
 
 | Category | Tools |
 |---|---|
 | Discovery | `appd_get_applications` |
-| Health | `appd_get_health_rules`, `appd_get_health_violations`, `appd_get_anomalies` |
+| Health | `appd_get_health_rules`, `appd_create_health_rule`, `appd_update_health_rule`, `appd_delete_health_rule`, `appd_enable_health_rule`, `appd_get_health_violations`, `appd_get_anomalies` |
 | Performance | `appd_get_business_transactions`, `appd_get_bt_performance`, `appd_get_service_endpoints`, `appd_get_service_endpoint_performance` |
 | Infrastructure | `appd_get_tiers_and_nodes`, `appd_get_backends` |
 | Diagnostics | `appd_get_snapshots`, `appd_get_errors` |

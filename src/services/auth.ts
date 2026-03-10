@@ -70,11 +70,12 @@ export async function getAccessToken(): Promise<string> {
         "isAxiosError" in error
       ) {
         const axErr = error as Error & {
-          response?: { status: number; data: unknown };
+          response?: { status: number };
         };
+        // Log only the HTTP status code — never log response body (may contain credentials)
         const details = axErr.response
-          ? `Status ${axErr.response.status}: ${JSON.stringify(axErr.response.data)}`
-          : axErr.message;
+          ? `HTTP ${axErr.response.status}`
+          : "network error";
         console.error(`OAuth authentication failed: ${details}`);
       }
       throw new Error(

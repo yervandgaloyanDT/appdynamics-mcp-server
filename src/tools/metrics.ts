@@ -20,7 +20,7 @@ const MetricDataSchema = {
   metricPath: z
     .string()
     .describe(
-      "The metric path to query. Use appd_browse_metric_tree to discover available paths. Examples: 'Overall Application Performance|Average Response Time (ms)', 'Application Infrastructure Performance|*|Hardware Resources|CPU|%Busy'."
+      "The metric path to query. Use appd_browse_metric_tree to discover available paths. Examples: 'Overall Application Performance|Average Response Time (ms)', 'Application Infrastructure Performance|*|Hardware Resources|CPU|%Busy'. For custom metrics use: 'Application Infrastructure Performance|{Tier}|Individual Nodes|{Node}|Custom Metrics|{MetricName}'."
     ),
   durationInMins: z
     .number()
@@ -28,6 +28,14 @@ const MetricDataSchema = {
     .min(1)
     .optional()
     .describe("Time range in minutes to look back. Defaults to 60."),
+  rollup: z
+    .boolean()
+    .optional()
+    .describe(
+      "Whether to aggregate (roll up) metric data across all entities matching the path. " +
+      "Default true (aggregated). Set to false for custom metrics or per-node metrics — " +
+      "custom metrics live at node level and return empty data when rolled up."
+    ),
 };
 
 // ── Browse Metric Tree ───────────────────────────────────────────────────────
@@ -40,7 +48,14 @@ const BrowseMetricTreeSchema = {
     .string()
     .optional()
     .describe(
-      "Parent metric path to browse. Omit to see the top-level folders. Use pipe-separated paths like 'Overall Application Performance' or 'Application Infrastructure Performance|Tier1'."
+      "Parent metric path to browse. Omit to see the top-level folders. Use pipe-separated paths like 'Overall Application Performance' or 'Application Infrastructure Performance|Tier1'. Custom metrics live under 'Application Infrastructure Performance|{Tier}|Individual Nodes|{Node}|Custom Metrics'."
+    ),
+  rollup: z
+    .boolean()
+    .optional()
+    .describe(
+      "Whether to aggregate (roll up) metric data across all entities matching the path. " +
+      "Default true (aggregated). Set to false when browsing node-level or custom metric paths."
     ),
 };
 
@@ -57,10 +72,15 @@ This is a generic tool that can retrieve any metric — infrastructure (CPU, mem
 
 Use appd_browse_metric_tree to discover available metric paths first.
 
+**Custom metrics**: Machine agent custom metrics are stored per-node, not aggregated at tier level. To query them, use rollup=false and a node-level path:
+  'Application Infrastructure Performance|{Tier}|Individual Nodes|{Node}|Custom Metrics|{MetricName}'
+Wildcard example: 'Application Infrastructure Performance|*|Individual Nodes|*|Custom Metrics|MyMetric' with rollup=false
+
 Args:
   - application (string|number): App name or ID
   - metricPath (string): Full metric path (pipe-separated)
   - durationInMins (number, optional): Lookback in minutes (default: 60)
+  - rollup (boolean, optional): Aggregate across entities (default: true). Set false for custom/per-node metrics.
 
 Returns: Array of metric data objects with timestamps, min, max, avg, count, sum values.`,
       inputSchema: MetricDataSchema,
@@ -71,7 +91,7 @@ Returns: Array of metric data objects with timestamps, min, max, avg, count, sum
         openWorldHint: true,
       },
     },
-    async ({ application, metricPath, durationInMins }) => {
+    async ({ application, metricPath, durationInMins, rollup }) => {
       try {
         const appId = await resolveAppId(application);
         const duration = durationInMins ?? DEFAULT_DURATION_MINS;
@@ -82,6 +102,7 @@ Returns: Array of metric data objects with timestamps, min, max, avg, count, sum
             "metric-path": metricPath,
             "time-range-type": "BEFORE_NOW",
             "duration-in-mins": duration,
+            ...(rollup !== undefined && { rollup }),
           }
         );
 
@@ -110,9 +131,14 @@ Common top-level folders:
   - Errors
   - Service Endpoints
 
+**Custom metrics** (submitted by machine agents) live under:
+  'Application Infrastructure Performance|{Tier}|Individual Nodes|{Node}|Custom Metrics'
+Use rollup=false when browsing node-level paths to ensure per-node data is returned.
+
 Args:
   - application (string|number): App name or ID
   - metricPath (string, optional): Parent path to browse (omit for top-level)
+  - rollup (boolean, optional): Aggregate across entities (default: true). Set false for node-level browsing.
 
 Returns: Array of child metric nodes with name, type (folder or leaf), and full path.`,
       inputSchema: BrowseMetricTreeSchema,
@@ -123,13 +149,16 @@ Returns: Array of child metric nodes with name, type (folder or leaf), and full 
         openWorldHint: true,
       },
     },
-    async ({ application, metricPath }) => {
+    async ({ application, metricPath, rollup }) => {
       try {
         const appId = await resolveAppId(application);
 
         const params: Record<string, string | number | boolean | undefined> = {};
         if (metricPath) {
           params["metric-path"] = metricPath;
+        }
+        if (rollup !== undefined) {
+          params["rollup"] = rollup;
         }
 
         const data = await appdGet(

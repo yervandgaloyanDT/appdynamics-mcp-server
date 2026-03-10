@@ -15,7 +15,7 @@
  */
 
 import { writeFile } from "fs/promises";
-import { resolve } from "path";
+import { resolve, isAbsolute, normalize } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -106,8 +106,17 @@ const WidgetSchema = z.object({
     .describe("Application name (required for export-format files to embed correct metric paths)."),
   adqlQuery: z
     .string()
+    .max(2000, "ADQL query must be 2000 characters or fewer")
     .optional()
-    .describe("ADQL query string for ANALYTICS widget type."),
+    .describe("ADQL query string for ANALYTICS widget type (max 2000 chars)."),
+  healthRuleIds: z
+    .array(z.number().int())
+    .optional()
+    .describe(
+      "For HEALTH_LIST widgets: numeric IDs of specific health rules to display. " +
+      "Each widget shows only the listed rules. Omit to show all rules for the application. " +
+      "Use appd_get_health_rules to look up rule IDs."
+    ),
 });
 
 const CreateSchema = {
@@ -311,7 +320,7 @@ Returns: The created dashboard object with its new ID.`,
 
         const newId = await importViaServlet(exportPayload, name);
 
-        // Bind metric criteria via RESTUI two-step approach.
+        // Bind metric criteria and health rule scoping via RESTUI two-step approach.
         if (newId != null) {
           try {
             await bindMetricWidgets(
@@ -322,6 +331,11 @@ Returns: The created dashboard object with its new ID.`,
             );
           } catch {
             // Non-fatal: dashboard exists, widgets may show no data
+          }
+          try {
+            await bindHealthListWidgets(newId);
+          } catch {
+            // Non-fatal
           }
         }
 
@@ -363,7 +377,7 @@ Returns: The updated dashboard object.`,
     },
     async ({ dashboardId, name, description, height, width, widgets }) => {
       try {
-        const existing = await appdGetRaw<Dashboard>(
+        const existing = await appdGetRaw<Record<string, unknown>>(
           `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
         );
 
@@ -389,7 +403,7 @@ Returns: The updated dashboard object.`,
         // Step 1: Update dashboard properties + new widgets WITHOUT inline metric criteria.
         // New widgets need server-assigned IDs/GUIDs before criteria can reference them.
         const updated = {
-          ...(existing as unknown as Record<string, unknown>),
+          ...existing,
           ...(name !== undefined && { name }),
           ...(description !== undefined && { description }),
           ...(height !== undefined && { height }),
@@ -408,7 +422,7 @@ Returns: The updated dashboard object.`,
 
         await appdPost<Dashboard>("/controller/restui/dashboards/updateDashboard", updated);
 
-        // Step 2: Bind metric criteria using server-assigned widget IDs/GUIDs.
+        // Step 2: Bind metric criteria and health rule scoping using server-assigned widget IDs/GUIDs.
         if (resolvedWidgets !== undefined) {
           const metricWidgets = resolvedWidgets.filter(
             w => w.metricPath !== undefined && w.applicationId !== undefined
@@ -419,6 +433,11 @@ Returns: The updated dashboard object.`,
             } catch {
               // Non-fatal: dashboard updated, widgets may show no data
             }
+          }
+          try {
+            await bindHealthListWidgets(dashboardId);
+          } catch {
+            // Non-fatal
           }
         }
 
@@ -904,7 +923,7 @@ Returns: The created dashboard name and ID.`,
 
         const newId = await importViaServlet(exportPayload, dashName);
 
-        // Bind metric criteria via RESTUI two-step approach.
+        // Bind metric criteria and health rule scoping via RESTUI two-step approach.
         // The import servlet creates widgets (assigning ids/guids) but drops metric bindings.
         // We re-fetch and bind BT_AFFECTED_EMC criteria to each metric widget.
         if (newId != null) {
@@ -917,6 +936,11 @@ Returns: The created dashboard name and ID.`,
             );
           } catch {
             // Non-fatal: dashboard exists, widgets may show no data
+          }
+          try {
+            await bindHealthListWidgets(newId);
+          } catch {
+            // Non-fatal
           }
         }
 
@@ -1049,6 +1073,15 @@ Returns: The newly created dashboard with its new ID.`,
 
         const newId = await importViaServlet(finalPayload, resolvedName);
 
+        // Fix HEALTH_LIST entityIds after import (servlet leaves them empty)
+        if (newId != null) {
+          try {
+            await bindHealthListWidgets(newId);
+          } catch {
+            // Non-fatal
+          }
+        }
+
         return textResponse(
           `Dashboard "${resolvedName}" imported successfully` +
           (newId != null ? ` (ID: ${newId}).` : `. ID unknown — check appd_get_dashboards.`)
@@ -1143,7 +1176,18 @@ Returns: Absolute path of the saved file and a widget summary.`,
         const json = JSON.stringify(dashboardPayload, null, 2);
 
         const slug = name.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
-        const outputPath = resolve(filePath ?? `./dashboard-${slug}.json`);
+
+        let outputPath: string;
+        if (filePath) {
+          // Reject paths containing traversal sequences
+          const normalized = normalize(filePath);
+          if (normalized.includes("..") || (!isAbsolute(normalized) && normalized.startsWith("/"))) {
+            return textResponse("Error: filePath must not contain path traversal sequences ('..').");
+          }
+          outputPath = resolve(normalized);
+        } else {
+          outputPath = resolve(`./dashboard-${slug}.json`);
+        }
 
         await writeFile(outputPath, json, "utf-8");
 
@@ -1187,6 +1231,7 @@ interface WidgetInput {
   description?: string;
   adqlQuery?: string;
   btIds?: number[];
+  healthRuleIds?: number[];
 }
 
 // ── Export Format Builders ────────────────────────────────────────────────────
@@ -1332,8 +1377,8 @@ function buildExportWidgetPayload(w: WidgetInput, index: number): Record<string,
   // ── HealthListWidget ──────────────────────────────────────────────────────
   if (widgetType === "HealthListWidget") {
     const appName = w.applicationName ?? String(w.applicationId ?? "");
-    base.applicationReference = null;
-    base.entityReferences = appName ? [{
+    // applicationReference scopes the widget to this application
+    base.applicationReference = appName ? {
       applicationName: appName,
       entityType: "APPLICATION",
       entityName: appName,
@@ -1341,9 +1386,19 @@ function buildExportWidgetPayload(w: WidgetInput, index: number): Record<string,
       scopingEntityName: null,
       subtype: null,
       uniqueKey: null,
-    }] : [];
+    } : null;
+    // Scoping mechanism discovered from AppD UI:
+    //   propertiesMap.selectedEntityIds = health rule ID(s) as comma-separated string
+    //   entitySelectionType = null  (NOT "ALL" — null tells AppD to use selectedEntityIds)
+    // Without selectedEntityIds the widget shows all rules for the application.
     base.entityType = w.entityType ?? "POLICY";
-    base.entitySelectionType = "ALL";
+    base.entitySelectionType = null;
+    base.entityReferences = [];
+    if (w.healthRuleIds?.length) {
+      base.propertiesMap = { selectedEntityIds: w.healthRuleIds.join(",") };
+    } else {
+      base.propertiesMap = null;
+    }
     base.iconSize = 18;
     base.iconPosition = "LEFT";
     base.showSearchBox = false;
@@ -1394,7 +1449,7 @@ function buildExportWidgetPayload(w: WidgetInput, index: number): Record<string,
             inputMetricPath,
             relativeMetricPath: w.metricPath,
           },
-          rollupMetricData: true,
+          rollupMetricData: false,
           expressionString: "",
           useActiveBaseline: false,
           sortResultsAscending: false,
@@ -1629,9 +1684,15 @@ function buildWidgetPayload(
   if (apiType === "HEALTH_LIST") {
     base.useMetricBrowserAsDrillDown = false;
     base.applicationId = w.applicationId ?? null;
-    base.entityType = w.entityType ?? "APPLICATION";
-    base.entitySelectionType = "ALL";
-    base.entityIds = [];
+    base.entityType = w.entityType ?? "POLICY";
+    if (w.healthRuleIds?.length) {
+      base.entitySelectionType = "SPECIFIED";
+      base.entityIds = w.healthRuleIds;
+      base.properties = [];
+    } else {
+      base.entitySelectionType = "ALL";
+      base.entityIds = [];
+    }
     base.iconSize = 20;
     base.iconPosition = "LEFT";
     base.showSearchBox = false;
@@ -1672,7 +1733,7 @@ function buildWidgetPayload(
             inputMetricPath: w.metricPath,
             value: 0,
           },
-          rollupMetricData: true,
+          rollupMetricData: apiType !== "TIMESERIES_GRAPH",
           expressionString: "",
           metricDisplayNameStyle: "DISPLAY_STYLE_AUTO",
           metricDisplayNameCustomFormat: null,
@@ -1759,6 +1820,9 @@ function buildResuiMetricSeries(
   const segments = w.metricPath.split("|");
   const logicalMetricName = segments[segments.length - 1] ?? w.metricPath;
   const hasSpecificBTs = w.btIds && w.btIds.length > 0;
+  // TIMESERIES_GRAPH needs false (returns individual time-series points).
+  // METRIC_VALUE / GAUGE / PIE need true (aggregate to a single display value).
+  const rollupMetricData = w.type !== "TIMESERIES_GRAPH" && w.type !== "GraphWidget";
   return [
     {
       id: 0,
@@ -1804,7 +1868,7 @@ function buildResuiMetricSeries(
           extractedAppIdsFromAnalyticsMetric: null,
           value: 0,
         },
-        rollupMetricData: true,
+        rollupMetricData,
         expressionString: "",
         metricDisplayNameStyle: "DISPLAY_STYLE_AUTO",
         metricDisplayNameCustomFormat: null,
@@ -1872,3 +1936,44 @@ async function bindMetricWidgets(
     widgets: updatedWidgets,
   });
 }
+
+/**
+ * After importing via servlet, HEALTH_LIST widgets have properties.selectedEntityIds
+ * set correctly but entityIds=[] and entitySelectionType=null, so AppD shows "All".
+ * The working format (confirmed from existing dashboards) requires:
+ *   entitySelectionType: "SPECIFIED"  (NOT null, NOT "ALL", NOT "SPECIFIC")
+ *   entityIds: [ruleId]
+ *   properties: []  (selectedEntityIds property not needed when SPECIFIED+entityIds is set)
+ */
+async function bindHealthListWidgets(dashId: number): Promise<void> {
+  const dash = await appdGetRaw<Record<string, unknown>>(
+    `/controller/restui/dashboards/dashboardIfUpdated/${dashId}/-1`,
+  );
+  const dashWidgets = (dash["widgets"] as Array<Record<string, unknown>>) ?? [];
+
+  let hasChanges = false;
+  const updatedWidgets = dashWidgets.map((w) => {
+    if (w["type"] !== "HEALTH_LIST") return w;
+    // Get rule ID from properties.selectedEntityIds (set by import servlet)
+    const props = (w["properties"] as Array<Record<string, unknown>>) ?? [];
+    const prop = props.find((p) => p["name"] === "selectedEntityIds");
+    if (!prop) return w;
+    const ruleId = parseInt(String(prop["value"]), 10);
+    if (isNaN(ruleId)) return w;
+    hasChanges = true;
+    return {
+      ...w,
+      entitySelectionType: "SPECIFIED",
+      entityIds: [ruleId],
+      properties: [],  // Clear selectedEntityIds — SPECIFIED+entityIds is the canonical form
+    };
+  });
+
+  if (!hasChanges) return;
+  await appdPost("/controller/restui/dashboards/updateDashboard", {
+    ...dash,
+    widgets: updatedWidgets,
+  });
+}
+
+

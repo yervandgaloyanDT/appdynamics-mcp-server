@@ -63,6 +63,41 @@ export interface HealthRule {
   [key: string]: unknown;
 }
 
+export interface HealthRuleCondition {
+  name: string;
+  shortcutAlerted: boolean;
+  evalDetail: {
+    evalDetailType: "SINGLE_METRIC";
+    metricAggregateFunction: string;
+    metricPath: string;
+    metricEvalDetail: {
+      metricEvalDetailType: "SPECIFIC_TYPE";
+      compareCondition: string;
+      compareValue: number;
+    };
+  };
+}
+
+export interface HealthRulePayload {
+  name: string;
+  enabled: boolean;
+  useDataFromLastNMinutes: number;
+  waitTimeAfterViolation: number;
+  affects: Record<string, unknown>;
+  evalCriterias: {
+    criticalCriteria: {
+      conditionAggregationType: string;
+      shortcutAlertEnabled: boolean;
+      conditions: HealthRuleCondition[];
+    };
+    warningCriteria: {
+      conditionAggregationType: string;
+      shortcutAlertEnabled: boolean;
+      conditions: HealthRuleCondition[];
+    };
+  };
+}
+
 export interface HealthRuleViolation {
   id: number;
   name: string;

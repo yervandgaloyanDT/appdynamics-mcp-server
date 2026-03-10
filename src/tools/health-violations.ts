@@ -141,8 +141,8 @@ Returns: Array of health rule violations with severity, status, affected entity,
             } catch (error) {
               if (!isAxios404(error)) {
                 console.error(
-                  `Error fetching violations for ${app.name} (${app.id}):`,
-                  error instanceof Error ? error.message : String(error)
+                  `Error fetching violations for app ID ${app.id}:`,
+                  error instanceof Error ? error.message : "unknown error"
                 );
               }
             }

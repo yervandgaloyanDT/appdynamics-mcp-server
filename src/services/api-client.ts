@@ -99,6 +99,41 @@ export async function appdPostFormData<T = unknown>(
 }
 
 /**
+ * Make an authenticated PUT request to the AppDynamics REST API.
+ */
+export async function appdPut<T = unknown>(
+  path: string,
+  data?: unknown,
+  params?: Record<string, string | number | boolean | undefined>
+): Promise<T> {
+  const token = await getAccessToken();
+  const baseUrl = getBaseUrl();
+
+  const cleanParams: Record<string, string | number | boolean> = {};
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) {
+        cleanParams[key] = value;
+      }
+    }
+  }
+
+  const response = await axios({
+    method: "PUT",
+    url: `${baseUrl}${path}`,
+    data,
+    params: cleanParams,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    timeout: API_TIMEOUT_MS,
+  });
+
+  return response.data as T;
+}
+
+/**
  * Make an authenticated DELETE request to the AppDynamics REST API.
  */
 export async function appdDelete<T = unknown>(path: string): Promise<T> {
