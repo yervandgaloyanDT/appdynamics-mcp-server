@@ -333,7 +333,7 @@ Returns: The created dashboard object with its new ID.`,
             // Non-fatal: dashboard exists, widgets may show no data
           }
           try {
-            await bindHealthListWidgets(newId);
+            await bindHealthListWidgets(newId, resolvedWidgets);
           } catch {
             // Non-fatal
           }
@@ -435,7 +435,7 @@ Returns: The updated dashboard object.`,
             }
           }
           try {
-            await bindHealthListWidgets(dashboardId);
+            await bindHealthListWidgets(dashboardId, resolvedWidgets);
           } catch {
             // Non-fatal
           }
@@ -938,7 +938,7 @@ Returns: The created dashboard name and ID.`,
             // Non-fatal: dashboard exists, widgets may show no data
           }
           try {
-            await bindHealthListWidgets(newId);
+            await bindHealthListWidgets(newId, widgets);
           } catch {
             // Non-fatal
           }
@@ -1945,11 +1945,23 @@ async function bindMetricWidgets(
  *   entityIds: [ruleId]
  *   properties: []  (selectedEntityIds property not needed when SPECIFIED+entityIds is set)
  */
-async function bindHealthListWidgets(dashId: number): Promise<void> {
+async function bindHealthListWidgets(
+  dashId: number,
+  sourceWidgets?: WidgetInput[],
+): Promise<void> {
   const dash = await appdGetRaw<Record<string, unknown>>(
     `/controller/restui/dashboards/dashboardIfUpdated/${dashId}/-1`,
   );
   const dashWidgets = (dash["widgets"] as Array<Record<string, unknown>>) ?? [];
+
+  // Build title → applicationId lookup from source widgets so we can patch
+  // applicationId even when the import servlet couldn't resolve the app name.
+  const appIdByTitle = new Map<string, number>();
+  for (const w of sourceWidgets ?? []) {
+    if (w.type === "HEALTH_LIST" && w.applicationId != null) {
+      appIdByTitle.set(w.title, w.applicationId);
+    }
+  }
 
   let hasChanges = false;
   const updatedWidgets = dashWidgets.map((w) => {
@@ -1961,12 +1973,17 @@ async function bindHealthListWidgets(dashId: number): Promise<void> {
     const ruleId = parseInt(String(prop["value"]), 10);
     if (isNaN(ruleId)) return w;
     hasChanges = true;
-    return {
-      ...w,
+    const patch: Record<string, unknown> = {
       entitySelectionType: "SPECIFIED",
       entityIds: [ruleId],
-      properties: [],  // Clear selectedEntityIds — SPECIFIED+entityIds is the canonical form
+      properties: [],  // Clear selectedEntityIds — SPECIFIED+entityIds is canonical
     };
+    // Patch applicationId when import servlet couldn't resolve the app name
+    const srcAppId = appIdByTitle.get(w["title"] as string);
+    if (srcAppId != null && (!w["applicationId"] || w["applicationId"] === 0)) {
+      patch["applicationId"] = srcAppId;
+    }
+    return { ...w, ...patch };
   });
 
   if (!hasChanges) return;

@@ -84,11 +84,25 @@ export async function resolveAppId(
 
 /**
  * Resolve a numeric application ID to its name string.
- * Returns the numeric ID as a string fallback if name cannot be found.
+ * Falls back to a direct per-app API call (handles SIM and other special apps
+ * that don't appear in the standard /rest/applications list).
+ * Returns the numeric ID as a string only if all lookups fail.
  */
 export async function resolveAppName(appId: number): Promise<string> {
   const apps = await getApplicationsList();
-  return apps.find((a) => a.id === appId)?.name ?? String(appId);
+  const found = apps.find((a) => a.id === appId);
+  if (found) return found.name;
+
+  // Fallback: direct per-app endpoint (covers SIM and special application types)
+  try {
+    const direct = await appdGet<AppDApplication[]>(
+      `/controller/rest/applications/${appId}?output=JSON`
+    );
+    if (Array.isArray(direct) && direct[0]?.name) return direct[0].name;
+  } catch {
+    // ignore — return numeric fallback below
+  }
+  return String(appId);
 }
 
 /**
