@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AppDynamics MCP Server</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;700&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ─── TOKENS ─────────────────────────────────────────────────────── */
+:root {
+  --bg:      #07090F;
+  --s1:      #0C0F1A;
+  --s2:      #111827;
+  --s3:      #1A2336;
+  --b0:      rgba(255,255,255,0.05);
+  --b1:      rgba(255,255,255,0.10);
+  --b2:      rgba(255,255,255,0.16);
+  --cyan:    #00E5FF;
+  --cyan-d:  rgba(0,229,255,0.10);
+  --cyan-d2: rgba(0,229,255,0.05);
+  --amber:   #FFB300;
+  --amb-d:   rgba(255,179,0,0.10);
+  --green:   #00E676;
+  --grn-d:   rgba(0,230,118,0.10);
+  --red:     #FF1744;
+  --red-d:   rgba(255,23,68,0.10);
+  --purple:  #AA00FF;
+  --pur-d:   rgba(170,0,255,0.10);
+  --text:    #E2E8F0;
+  --text2:   #94A3B8;
+  --text3:   #475569;
+  --fD: 'Syne', sans-serif;
+  --fM: 'JetBrains Mono', monospace;
+  --fB: 'Outfit', sans-serif;
+}
+
+/* ─── RESET ──────────────────────────────────────────────────────── */
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+html,body { width:100%; height:100%; overflow:hidden; background:var(--bg); color:var(--text); font-family:var(--fB); -webkit-font-smoothing:antialiased; }
+svg { display:block; }
+
+/* ─── PROGRESS ───────────────────────────────────────────────────── */
+#prog {
+  position:fixed; top:0; left:0; height:2px; width:0%;
+  background:linear-gradient(90deg,var(--cyan),var(--purple));
+  z-index:9999; transition:width .6s cubic-bezier(.4,0,.2,1);
+  box-shadow:0 0 10px var(--cyan);
+}
+
+/* ─── DOTS ───────────────────────────────────────────────────────── */
+#dots {
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+  display:flex; gap:7px; z-index:9999;
+}
+.dot {
+  width:6px; height:6px; border-radius:3px; background:var(--text3);
+  cursor:pointer; transition:all .3s ease; border:1px solid var(--b1);
+}
+.dot.on { width:22px; background:var(--cyan); box-shadow:0 0 8px var(--cyan); }
+
+/* ─── ARROWS ─────────────────────────────────────────────────────── */
+.arr {
+  position:fixed; top:50%; transform:translateY(-50%); z-index:9999;
+  width:42px; height:42px; border-radius:50%; cursor:pointer;
+  background:rgba(255,255,255,0.03); border:1px solid var(--b1);
+  color:var(--text2); display:flex; align-items:center; justify-content:center;
+  font-size:20px; backdrop-filter:blur(12px); transition:all .2s ease;
+  user-select:none;
+}
+.arr:hover { background:var(--cyan-d); color:var(--cyan); border-color:rgba(0,229,255,0.3); box-shadow:0 0 20px rgba(0,229,255,0.15); }
+#ap { left:16px; }
+#an { right:16px; }
+
+/* ─── COUNTER ────────────────────────────────────────────────────── */
+#ctr {
+  position:fixed; top:18px; right:24px; z-index:9999;
+  font-family:var(--fM); font-size:10px; color:var(--text3); letter-spacing:.12em;
+}
+#ctr span { color:var(--cyan); }
+
+/* ─── DECK ───────────────────────────────────────────────────────── */
+#deck { width:100vw; height:100vh; position:relative; overflow:hidden; }
+
+.slide {
+  position:absolute; inset:0;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  padding:60px 80px;
+  opacity:0; pointer-events:none;
+  transform:translateX(60px);
+  transition:opacity .6s ease, transform .6s cubic-bezier(.4,0,.2,1);
+}
+.slide.active { opacity:1; pointer-events:all; transform:translateX(0); }
+.slide.out-l  { opacity:0; transform:translateX(-60px); transition:opacity .6s ease, transform .6s cubic-bezier(.4,0,.2,1); }
+.slide.no-tr  { transition:none !important; }
+
+/* ─── SHARED ─────────────────────────────────────────────────────── */
+.eyebrow {
+  font-family:var(--fM); font-size:10px; letter-spacing:.22em; text-transform:uppercase;
+  color:var(--cyan); display:flex; align-items:center; gap:10px; margin-bottom:14px;
+}
+.eyebrow::before { content:''; width:28px; height:1px; background:var(--cyan); flex-shrink:0; }
+
+.h1 { font-family:var(--fD); font-size:clamp(38px,4.5vw,62px); font-weight:800; letter-spacing:-.025em; line-height:.95; color:var(--text); margin-bottom:10px; }
+.h1 .ac { color:var(--cyan); }
+.h2 { font-family:var(--fD); font-size:clamp(28px,3vw,42px); font-weight:800; letter-spacing:-.02em; line-height:1; color:var(--text); margin-bottom:10px; }
+.h2 .ac { color:var(--cyan); }
+.sub { font-size:14px; color:var(--text2); line-height:1.65; max-width:560px; }
+
+.card { background:var(--s2); border:1px solid var(--b0); border-radius:12px; padding:22px; position:relative; overflow:hidden; }
+.card::before { content:''; position:absolute; top:0; left:0; right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,0.08),transparent); }
+
+.badge { display:inline-flex; align-items:center; padding:3px 9px; border-radius:3px; font-family:var(--fM); font-size:9px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+.bc { background:var(--cyan-d); color:var(--cyan); border:1px solid rgba(0,229,255,0.2); }
+.ba { background:var(--amb-d); color:var(--amber); border:1px solid rgba(255,179,0,0.2); }
+.bg { background:var(--grn-d); color:var(--green); border:1px solid rgba(0,230,118,0.2); }
+.br { background:var(--red-d); color:var(--red); border:1px solid rgba(255,23,68,0.2); }
+.bp { background:var(--pur-d); color:var(--purple); border:1px solid rgba(170,0,255,0.2); }
+
+.pd { width:8px; height:8px; border-radius:50%; position:relative; flex-shrink:0; }
+.pd::after { content:''; position:absolute; inset:-3px; border-radius:50%; border:1px solid currentColor; animation:ring 2s ease-out infinite; opacity:0; }
+.pd.gc { background:var(--cyan);  color:var(--cyan); }
+.pd.gg { background:var(--green); color:var(--green); }
+.pd.ga { background:var(--amber); color:var(--amber); }
+.pd.gr { background:var(--red);   color:var(--red); }
+@keyframes ring { 0%{transform:scale(.6);opacity:.8} 100%{transform:scale(1.8);opacity:0} }
+
+.bg-grid { position:absolute; inset:0; z-index:0; background-image:linear-gradient(rgba(0,229,255,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,229,255,0.025) 1px,transparent 1px); background-size:52px 52px; }
+.bg-dots { position:absolute; inset:0; z-index:0; background-image:radial-gradient(rgba(0,229,255,0.07) 1px,transparent 1px); background-size:30px 30px; }
+.scan { position:absolute; inset:0; z-index:1; pointer-events:none; background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.025) 2px,rgba(0,0,0,0.025) 4px); }
+
+/* ─── KEYFRAMES ──────────────────────────────────────────────────── */
+@keyframes fadeUp { from{opacity:0;transform:translateY(22px)} to{opacity:1;transform:translateY(0)} }
+@keyframes fadeIn { from{opacity:0} to{opacity:1} }
+@keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-9px)} }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+@keyframes drawLine { from{stroke-dashoffset:900} to{stroke-dashoffset:0} }
+@keyframes scaleBarX { from{transform:scaleX(0)} to{transform:scaleX(1)} }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 1 — TITLE
+═══════════════════════════════════════════════════════════════════ */
+#s1 { background:var(--bg); align-items:flex-start; padding-left:9vw; }
+
+.orb { position:absolute; border-radius:50%; filter:blur(90px); pointer-events:none; }
+
+#s1 .corner { position:absolute; }
+#s1 .corner.tl { top:0; left:0; width:180px; height:180px; border-top:1px solid rgba(0,229,255,0.15); border-left:1px solid rgba(0,229,255,0.15); }
+#s1 .corner.br { bottom:0; right:0; width:180px; height:180px; border-bottom:1px solid rgba(0,229,255,0.15); border-right:1px solid rgba(0,229,255,0.15); }
+
+.t-label { font-family:var(--fM); font-size:11px; letter-spacing:.28em; text-transform:uppercase; color:var(--cyan); display:flex; align-items:center; gap:12px; margin-bottom:20px; animation:fadeUp .8s ease both; }
+.t-label .tl-line { width:40px; height:1px; background:var(--cyan); }
+
+.t-h { font-family:var(--fD); font-size:clamp(56px,7vw,92px); font-weight:800; letter-spacing:-.03em; line-height:.92; animation:fadeUp .8s ease .12s both; }
+.t-h .l1 { display:block; color:var(--text); }
+.t-h .l2 { display:block; color:var(--cyan); text-shadow:0 0 50px rgba(0,229,255,0.35); }
+.t-h .l3 { display:block; color:transparent; -webkit-text-stroke:1px rgba(255,255,255,0.22); }
+
+.t-desc { margin-top:26px; font-size:16px; color:var(--text2); line-height:1.6; max-width:480px; animation:fadeUp .8s ease .26s both; }
+
+.t-stats { margin-top:38px; display:flex; gap:36px; animation:fadeUp .8s ease .4s both; }
+.t-stat .n { font-family:var(--fD); font-size:38px; font-weight:800; color:var(--cyan); letter-spacing:-.02em; line-height:1; }
+.t-stat .l { font-family:var(--fM); font-size:9px; letter-spacing:.18em; color:var(--text3); text-transform:uppercase; margin-top:4px; }
+
+/* Floating mini-dashboard */
+.mini-db {
+  position:absolute; right:6%; top:50%; transform:translateY(-50%);
+  width:360px; background:var(--s2); border:1px solid var(--b1);
+  border-radius:12px; overflow:hidden;
+  box-shadow:0 28px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,229,255,0.04);
+  animation:fadeIn 1s ease .6s both, float 4.5s ease-in-out 1.6s infinite;
+  z-index:2;
+}
+.mdb-bar { background:var(--s3); padding:8px 14px; border-bottom:1px solid var(--b0); display:flex; align-items:center; gap:7px; }
+.mdb-dot { width:8px; height:8px; border-radius:50%; }
+.mdb-title { margin-left:6px; font-family:var(--fM); font-size:9px; color:var(--text3); }
+.mdb-body { padding:14px 16px; display:flex; flex-direction:column; gap:12px; }
+.mdb-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.mdb-metric .mk { font-family:var(--fM); font-size:8px; color:var(--text3); text-transform:uppercase; letter-spacing:.08em; margin-bottom:3px; }
+.mdb-metric .mv { font-family:var(--fD); font-size:17px; font-weight:800; line-height:1; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 2 — WHAT IS IT
+═══════════════════════════════════════════════════════════════════ */
+#s2 { background:var(--s1); }
+
+.feat-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; width:100%; max-width:960px; margin-top:30px; }
+.feat-card { background:var(--s2); border:1px solid var(--b0); border-radius:16px; padding:28px; transition:transform .3s ease, border-color .3s ease; }
+.feat-card:hover { transform:translateY(-5px); }
+.feat-card:nth-child(1) { border-top:2px solid var(--cyan); }
+.feat-card:nth-child(2) { border-top:2px solid var(--purple); }
+.feat-card:nth-child(3) { border-top:2px solid var(--amber); }
+.feat-icon { width:44px; height:44px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:22px; margin-bottom:16px; }
+.feat-card:nth-child(1) .feat-icon { background:var(--cyan-d); }
+.feat-card:nth-child(2) .feat-icon { background:var(--pur-d); }
+.feat-card:nth-child(3) .feat-icon { background:var(--amb-d); }
+.feat-title { font-family:var(--fD); font-size:17px; font-weight:700; color:var(--text); margin-bottom:10px; }
+.feat-body { font-size:13px; color:var(--text2); line-height:1.65; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 3 — ARCHITECTURE
+═══════════════════════════════════════════════════════════════════ */
+#s3 { background:var(--bg); }
+
+.arch-flow { display:flex; align-items:center; width:100%; max-width:940px; margin-top:30px; gap:0; }
+.arch-node { flex:1; background:var(--s2); border:1px solid var(--b0); border-radius:14px; padding:22px 18px; text-align:center; }
+.arch-node:nth-child(1) { border-color:rgba(170,0,255,0.28); }
+.arch-node:nth-child(3) { border-color:rgba(0,229,255,0.28); }
+.arch-node:nth-child(5) { border-color:rgba(255,179,0,0.28); }
+.arch-icon { font-size:26px; margin-bottom:10px; }
+.arch-title { font-family:var(--fD); font-size:15px; font-weight:700; color:var(--text); margin-bottom:5px; }
+.arch-sub { font-family:var(--fM); font-size:9.5px; color:var(--text3); line-height:1.55; }
+.arch-arrow { width:56px; flex-shrink:0; display:flex; flex-direction:column; align-items:center; gap:5px; }
+.arch-aline { width:100%; height:1px; background:linear-gradient(90deg,rgba(0,229,255,0.2),var(--cyan),rgba(0,229,255,0.2)); position:relative; }
+.arch-aline::after { content:'▶'; position:absolute; right:-5px; top:-7px; font-size:9px; color:var(--cyan); }
+.arch-albl { font-family:var(--fM); font-size:8px; color:var(--text3); text-align:center; }
+
+.ftree { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; width:100%; max-width:940px; margin-top:20px; }
+.fe { display:flex; align-items:flex-start; gap:10px; background:var(--s2); border:1px solid var(--b0); border-radius:7px; padding:11px 13px; }
+.fe-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; margin-top:4px; }
+.fe-path { font-family:var(--fM); font-size:10px; color:var(--cyan); display:block; margin-bottom:2px; }
+.fe-desc { font-size:11px; color:var(--text3); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 4 — LIVE DASHBOARD (AppDynamics mockup)
+═══════════════════════════════════════════════════════════════════ */
+#s4 { background:var(--bg); padding:0; align-items:stretch; justify-content:flex-start; }
+
+.appd-nav { background:#0A0E1A; border-bottom:1px solid rgba(255,255,255,0.07); padding:0 18px; height:42px; display:flex; align-items:center; gap:14px; flex-shrink:0; }
+.appd-logo { font-family:var(--fD); font-size:13px; font-weight:700; color:var(--cyan); display:flex; align-items:center; gap:7px; letter-spacing:.04em; }
+.appd-logo .sep { color:var(--text3); font-weight:400; font-size:12px; }
+.appd-vsep { width:1px; height:18px; background:var(--b0); }
+.appd-tabs { display:flex; }
+.appd-tab { padding:0 14px; height:42px; display:flex; align-items:center; font-size:11.5px; color:var(--text3); cursor:pointer; border-bottom:2px solid transparent; transition:all .2s; }
+.appd-tab.on { color:var(--cyan); border-bottom-color:var(--cyan); }
+.appd-tr { margin-left:auto; font-family:var(--fM); font-size:9px; color:var(--text3); background:var(--s2); padding:4px 9px; border-radius:4px; border:1px solid var(--b0); }
+
+.dash-body { flex:1; padding:14px 18px; display:flex; flex-direction:column; gap:12px; overflow:hidden; min-height:0; }
+
+.kpi-row { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; flex-shrink:0; }
+.kpi { background:var(--s2); border:1px solid var(--b0); border-radius:8px; padding:13px 15px; }
+.kpi-lbl { font-family:var(--fM); font-size:8.5px; letter-spacing:.1em; color:var(--text3); text-transform:uppercase; margin-bottom:7px; }
+.kpi-val { font-family:var(--fD); font-size:26px; font-weight:800; line-height:1; margin-bottom:5px; }
+.kpi-dlt { font-family:var(--fM); font-size:9.5px; display:flex; align-items:center; gap:4px; }
+.up { color:var(--red); } .dn { color:var(--green); } .neu { color:var(--text3); }
+
+.charts-row { display:grid; grid-template-columns:2fr 1fr; gap:12px; flex:1; min-height:0; }
+.cpanel { background:var(--s2); border:1px solid var(--b0); border-radius:8px; padding:13px; display:flex; flex-direction:column; min-height:0; }
+.cpanel-title { font-size:11px; color:var(--text2); font-weight:600; margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+.cpanel-sub { font-family:var(--fM); font-size:9px; color:var(--text3); }
+.csvg { flex:1; width:100%; min-height:0; overflow:visible; }
+
+.bt-list { display:flex; flex-direction:column; gap:5px; overflow:hidden; }
+.bt-row { display:grid; grid-template-columns:1fr auto auto; gap:7px; align-items:center; padding:7px 9px; border-radius:6px; background:var(--s3); }
+.bt-name { font-family:var(--fM); font-size:9.5px; color:var(--text2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bt-rt { font-family:var(--fD); font-size:12px; font-weight:700; }
+.bt-c { font-family:var(--fM); font-size:8.5px; color:var(--text3); }
+.bt-bw { grid-column:1/-1; height:2.5px; background:var(--s2); border-radius:2px; margin-top:1px; }
+.bt-b { height:100%; border-radius:2px; transform:scaleX(0); transform-origin:left; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 5 — ALERTS
+═══════════════════════════════════════════════════════════════════ */
+#s5 { background:var(--s1); align-items:flex-start; }
+
+.alerts-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; width:100%; max-width:960px; margin-top:24px; }
+.ac { background:var(--s2); border:1px solid var(--b0); border-left-width:3px; border-radius:12px; padding:18px; }
+.ac.crit { border-left-color:var(--red); }
+.ac.warn { border-left-color:var(--amber); }
+.ac.info { border-left-color:var(--cyan); }
+.ac.ok   { border-left-color:var(--green); }
+.ac-head { display:flex; align-items:center; gap:9px; margin-bottom:10px; }
+.ac-sev { font-family:var(--fM); font-size:8.5px; font-weight:700; letter-spacing:.1em; padding:3px 8px; border-radius:3px; }
+.ac.crit .ac-sev { background:var(--red-d);  color:var(--red); }
+.ac.warn .ac-sev { background:var(--amb-d); color:var(--amber); }
+.ac.info .ac-sev { background:var(--cyan-d); color:var(--cyan); }
+.ac.ok   .ac-sev { background:var(--grn-d);  color:var(--green); }
+.ac-title { font-size:13px; font-weight:600; color:var(--text); flex:1; }
+.ac-time  { font-family:var(--fM); font-size:9px; color:var(--text3); }
+.ac-cond { font-family:var(--fM); font-size:11px; color:var(--text2); margin-bottom:12px; line-height:1.5; }
+.ac-cond .ha { color:var(--amber); } .ac-cond .hr { color:var(--red); } .ac-cond .hc { color:var(--cyan); } .ac-cond .hg { color:var(--green); }
+.ac-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.am { text-align:center; }
+.am-val { font-family:var(--fD); font-size:18px; font-weight:700; margin-bottom:2px; }
+.am-key { font-family:var(--fM); font-size:8.5px; color:var(--text3); text-transform:uppercase; letter-spacing:.07em; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 6 — 23 TOOLS
+═══════════════════════════════════════════════════════════════════ */
+#s6 { background:var(--bg); }
+
+.tools-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; width:100%; max-width:960px; margin-top:24px; }
+.tc { background:var(--s2); border:1px solid var(--b0); border-radius:12px; padding:16px 18px; }
+.tc-head { display:flex; align-items:center; gap:9px; margin-bottom:11px; }
+.tc-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.tc-name { font-family:var(--fD); font-size:13px; font-weight:700; color:var(--text); }
+.tc-count { margin-left:auto; font-family:var(--fM); font-size:9.5px; color:var(--text3); }
+.tl { display:flex; flex-direction:column; gap:4px; }
+.ti { font-family:var(--fM); font-size:9.5px; color:var(--text3); padding:4px 8px; border-radius:4px; background:var(--s3); display:flex; align-items:center; gap:5px; }
+.ti::before { content:'›'; opacity:.5; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 7 — DASHBOARD FORMATS
+═══════════════════════════════════════════════════════════════════ */
+#s7 { background:var(--s1); }
+
+.fmt-split { display:grid; grid-template-columns:1fr 1fr; gap:22px; width:100%; max-width:880px; margin-top:28px; }
+.fmt { background:var(--s2); border-radius:16px; padding:26px; border:1px solid var(--b0); }
+.fmt:nth-child(1) { border-top:2px solid var(--cyan); }
+.fmt:nth-child(2) { border-top:2px solid var(--purple); }
+.fmt-title { font-family:var(--fD); font-size:19px; font-weight:700; margin-bottom:5px; }
+.fmt-uses { font-family:var(--fM); font-size:9.5px; color:var(--text3); margin-bottom:18px; }
+.fmt-props { display:flex; flex-direction:column; gap:9px; }
+.fp { display:grid; grid-template-columns:100px 1fr; gap:10px; font-size:12px; align-items:start; }
+.fp-k { font-family:var(--fM); font-size:9.5px; color:var(--text3); padding-top:3px; }
+.fp-v { font-family:var(--fM); font-size:10.5px; background:var(--s3); padding:4px 9px; border-radius:4px; }
+.fmt:nth-child(1) .fp-v { color:var(--cyan); }
+.fmt:nth-child(2) .fp-v { color:var(--purple); }
+.warn-banner { margin-top:20px; width:100%; max-width:880px; background:rgba(255,179,0,0.05); border:1px solid rgba(255,179,0,0.2); border-radius:8px; padding:12px 16px; font-family:var(--fM); font-size:11px; color:var(--amber); display:flex; align-items:center; gap:10px; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 8 — RCA
+═══════════════════════════════════════════════════════════════════ */
+#s8 { background:var(--bg); }
+
+.rca-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; width:100%; max-width:900px; margin-top:26px; }
+.rca-phase { background:var(--s2); border:1px solid var(--b0); border-radius:14px; padding:24px; }
+.rca-phase:nth-child(1) { border-top:2px solid var(--cyan); }
+.rca-phase:nth-child(2) { border-top:2px solid var(--green); }
+.rca-pbadge { display:flex; align-items:center; gap:7px; font-family:var(--fM); font-size:9.5px; font-weight:700; letter-spacing:.12em; margin-bottom:12px; }
+.rca-ptitle { font-family:var(--fD); font-size:18px; font-weight:700; color:var(--text); margin-bottom:14px; }
+.rca-steps { display:flex; flex-direction:column; gap:9px; }
+.rca-step { display:flex; align-items:flex-start; gap:11px; padding:9px 11px; border-radius:7px; background:var(--s3); }
+.rca-num { width:20px; height:20px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-family:var(--fM); font-size:8.5px; font-weight:700; flex-shrink:0; }
+.rca-phase:nth-child(1) .rca-num { background:var(--cyan-d); color:var(--cyan); border:1px solid rgba(0,229,255,0.25); }
+.rca-phase:nth-child(2) .rca-num { background:var(--grn-d);  color:var(--green); border:1px solid rgba(0,230,118,0.25); }
+.rca-txt { font-size:12px; color:var(--text2); line-height:1.4; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   SLIDE 9 — GET STARTED
+═══════════════════════════════════════════════════════════════════ */
+#s9 { background:var(--s1); }
+
+.gs-grid { display:grid; grid-template-columns:1fr 1fr; gap:22px; width:100%; max-width:960px; margin-top:26px; align-items:start; }
+
+.term { background:#080808; border:1px solid rgba(255,255,255,0.1); border-radius:12px; overflow:hidden; box-shadow:0 22px 60px rgba(0,0,0,0.5); }
+.term-bar { background:#141414; padding:10px 14px; border-bottom:1px solid rgba(255,255,255,0.05); display:flex; align-items:center; gap:7px; }
+.tdot { width:10px; height:10px; border-radius:50%; }
+.term-lbl { margin-left:8px; font-family:var(--fM); font-size:9px; color:#444; }
+.term-body { padding:18px 20px; font-family:var(--fM); font-size:12px; line-height:2; }
+.tp { color:var(--cyan); } .tc2 { color:var(--text); } .tco { color:var(--text3); } .to { color:var(--green); } .toc { color:var(--cyan); }
+.cur { display:inline-block; width:7px; height:12px; background:var(--cyan); vertical-align:middle; animation:blink 1s step-end infinite; }
+
+.gs-r { display:flex; flex-direction:column; gap:13px; }
+.env-card { background:var(--s2); border:1px solid var(--b0); border-radius:12px; padding:18px; }
+.env-title { font-family:var(--fM); font-size:9.5px; letter-spacing:.15em; color:var(--cyan); text-transform:uppercase; margin-bottom:13px; }
+.ev { margin-bottom:10px; }
+.ev:last-child { margin-bottom:0; }
+.ev-name { font-family:var(--fM); font-size:11px; color:var(--amber); display:flex; align-items:center; justify-content:space-between; margin-bottom:3px; }
+.ev-val { font-family:var(--fM); font-size:10px; color:var(--text3); }
+
+.sum-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }
+.ss { background:var(--s2); border:1px solid var(--b0); border-radius:9px; padding:13px; text-align:center; }
+.ss-n { font-family:var(--fD); font-size:26px; font-weight:800; line-height:1; margin-bottom:4px; }
+.ss-l { font-family:var(--fM); font-size:8.5px; color:var(--text3); letter-spacing:.1em; }
+</style>
+</head>
+<body>
+
+<div id="prog"></div>
+<div id="ctr"><span id="cn">01</span> / 09</div>
+<div id="dots"></div>
+<div class="arr" id="ap" onclick="go(-1)">‹</div>
+<div class="arr" id="an" onclick="go(1)">›</div>
+
+<div id="deck">
+
+<!-- ════════════════════════════════════════════════════════════
+     S1 — TITLE
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s1">
+  <div class="bg-grid"></div>
+  <div class="scan"></div>
+  <div class="corner tl"></div>
+  <div class="corner br"></div>
+  <div class="orb" style="width:500px;height:500px;background:radial-gradient(circle,rgba(0,229,255,0.08),transparent 70%);top:5%;right:0%;"></div>
+  <div class="orb" style="width:320px;height:320px;background:radial-gradient(circle,rgba(170,0,255,0.08),transparent 70%);bottom:10%;right:22%;"></div>
+
+  <div style="position:relative;z-index:2;max-width:560px;">
+    <div class="t-label"><span class="tl-line"></span>Model Context Protocol Server</div>
+    <h1 class="t-h">
+      <span class="l1">AppDynamics</span>
+      <span class="l2">MCP</span>
+      <span class="l3">Server</span>
+    </h1>
+    <p class="t-desc">Expose full AppDynamics observability — metrics, dashboards, alerts, and root-cause analysis — directly to Claude, Cursor, and any MCP-compatible AI tool.</p>
+    <div class="t-stats">
+      <div class="t-stat"><div class="n" data-count="23">0</div><div class="l">MCP Tools</div></div>
+      <div class="t-stat"><div class="n" data-count="6">0</div><div class="l">Categories</div></div>
+      <div class="t-stat"><div class="n" style="font-size:22px;padding-top:7px;">OAuth2</div><div class="l">Auth</div></div>
+    </div>
+  </div>
+
+  <!-- Floating mini dashboard -->
+  <div class="mini-db">
+    <div class="mdb-bar">
+      <div class="mdb-dot" style="background:#ff5f57;"></div>
+      <div class="mdb-dot" style="background:#ffbd2e;"></div>
+      <div class="mdb-dot" style="background:#28ca41;"></div>
+      <span class="mdb-title">appd_get_metric_data — SuperCarStore</span>
+    </div>
+    <div class="mdb-body">
+      <svg width="100%" height="64" viewBox="0 0 330 64">
+        <defs>
+          <linearGradient id="mg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#00E5FF" stop-opacity=".28"/>
+            <stop offset="100%" stop-color="#00E5FF" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <line x1="0" y1="16" x2="330" y2="16" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+        <line x1="0" y1="32" x2="330" y2="32" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+        <line x1="0" y1="48" x2="330" y2="48" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+        <path d="M0,50 C25,46 38,22 65,18 C90,14 105,36 130,31 C158,26 172,10 198,13 C220,16 238,34 260,29 C282,24 300,16 330,19 L330,64 L0,64 Z" fill="url(#mg)"/>
+        <path id="mline" d="M0,50 C25,46 38,22 65,18 C90,14 105,36 130,31 C158,26 172,10 198,13 C220,16 238,34 260,29 C282,24 300,16 330,19" fill="none" stroke="#00E5FF" stroke-width="1.5" stroke-dasharray="900" stroke-dashoffset="900"/>
+        <text x="0"   y="62" font-family="JetBrains Mono" font-size="7" fill="#475569">-30m</text>
+        <text x="280" y="62" font-family="JetBrains Mono" font-size="7" fill="#475569">now</text>
+      </svg>
+      <div class="mdb-metrics">
+        <div class="mdb-metric"><div class="mk">Avg RT</div><div class="mv" style="color:var(--amber);">284ms</div></div>
+        <div class="mdb-metric"><div class="mk">Errors</div><div class="mv" style="color:var(--green);">0.8%</div></div>
+        <div class="mdb-metric"><div class="mk">Calls/m</div><div class="mv" style="color:var(--cyan);">2.4K</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S2 — WHAT IS IT
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s2">
+  <div class="bg-dots" style="opacity:.45;"></div>
+  <div style="width:100%;max-width:960px;position:relative;z-index:2;">
+    <div class="eyebrow">Overview</div>
+    <h2 class="h2">What <span class="ac">is it?</span></h2>
+    <p class="sub">A Model Context Protocol server that bridges live AppDynamics observability data with AI assistants — turning natural language into production insights.</p>
+    <div class="feat-grid">
+      <div class="feat-card">
+        <div class="feat-icon">⚡</div>
+        <div class="feat-title">Model Context Protocol</div>
+        <div class="feat-body">An open standard that lets AI tools call external data sources. This server registers 23 tools Claude or Cursor can invoke to query live AppDynamics data in real-time.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">📊</div>
+        <div class="feat-title">AppDynamics Integration</div>
+        <div class="feat-body">Connects to AppDynamics SaaS REST and RESTUI APIs with OAuth2. Covers applications, metrics, transactions, health, snapshots, dashboards and more.</div>
+      </div>
+      <div class="feat-card">
+        <div class="feat-icon">🤖</div>
+        <div class="feat-title">AI-Native Observability</div>
+        <div class="feat-body">Ask "What's degraded in production?" and get live data, automated root-cause analysis, and auto-generated monitoring dashboards in a single conversation.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S3 — ARCHITECTURE
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s3">
+  <div class="bg-grid" style="opacity:.4;"></div>
+  <div style="width:100%;max-width:960px;position:relative;z-index:2;">
+    <div class="eyebrow">System Design</div>
+    <h2 class="h2">Architecture</h2>
+    <div class="arch-flow">
+      <div class="arch-node">
+        <div class="arch-icon">🖥️</div>
+        <div class="arch-title">MCP Clients</div>
+        <div class="arch-sub">Claude Desktop<br>Cursor IDE<br>Any MCP client</div>
+        <div style="margin-top:11px;"><span class="badge bp">stdio transport</span></div>
+      </div>
+      <div class="arch-arrow">
+        <div class="arch-aline"></div>
+        <div class="arch-albl">JSON-RPC</div>
+      </div>
+      <div class="arch-node">
+        <div class="arch-icon">⚙️</div>
+        <div class="arch-title">MCP Server</div>
+        <div class="arch-sub">src/index.ts<br>McpServer + Zod<br>23 tools registered</div>
+        <div style="margin-top:11px;"><span class="badge bc">TypeScript</span></div>
+      </div>
+      <div class="arch-arrow">
+        <div class="arch-aline"></div>
+        <div class="arch-albl">HTTPS/OAuth2</div>
+      </div>
+      <div class="arch-node">
+        <div class="arch-icon">☁️</div>
+        <div class="arch-title">AppDynamics</div>
+        <div class="arch-sub">SaaS Controller<br>/rest/ &amp; /restui/<br>OAuth2 tokens</div>
+        <div style="margin-top:11px;"><span class="badge ba">REST API</span></div>
+      </div>
+    </div>
+    <div class="ftree">
+      <div class="fe"><div class="fe-dot" style="background:var(--cyan);"></div><div><span class="fe-path">src/index.ts</span><span class="fe-desc">Entry — registers all 23 tools</span></div></div>
+      <div class="fe"><div class="fe-dot" style="background:var(--purple);"></div><div><span class="fe-path">services/api-client.ts</span><span class="fe-desc">Shared HTTP + auth client</span></div></div>
+      <div class="fe"><div class="fe-dot" style="background:var(--amber);"></div><div><span class="fe-path">services/auth.ts</span><span class="fe-desc">OAuth2 token caching</span></div></div>
+      <div class="fe"><div class="fe-dot" style="background:var(--green);"></div><div><span class="fe-path">tools/dashboards.ts</span><span class="fe-desc">Full CRUD + auto-build</span></div></div>
+      <div class="fe"><div class="fe-dot" style="background:var(--red);"></div><div><span class="fe-path">tools/root-cause.ts</span><span class="fe-desc">Two-phase RCA engine</span></div></div>
+      <div class="fe"><div class="fe-dot" style="background:var(--cyan);"></div><div><span class="fe-path">utils/app-resolver.ts</span><span class="fe-desc">App name → ID resolver</span></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S4 — LIVE DASHBOARD (AppDynamics mockup)
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s4">
+  <div class="appd-nav">
+    <div class="appd-logo">
+      <span style="font-size:15px;color:var(--cyan);">◈</span> AppDynamics
+      <span class="sep">/ SuperCarStore / Overview</span>
+    </div>
+    <div class="appd-vsep"></div>
+    <div class="appd-tabs">
+      <div class="appd-tab on">Overview</div>
+      <div class="appd-tab">Business Transactions</div>
+      <div class="appd-tab">Tiers &amp; Nodes</div>
+      <div class="appd-tab">Dashboards</div>
+    </div>
+    <div class="appd-tr">⏱ Last 30 min</div>
+  </div>
+
+  <div class="dash-body">
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="kpi-lbl">Avg Response Time</div>
+        <div class="kpi-val" style="color:var(--amber);"><span data-count="284">0</span><span style="font-size:14px;font-weight:400;">ms</span></div>
+        <div class="kpi-dlt up">▲ 18% vs baseline</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-lbl">Error Rate</div>
+        <div class="kpi-val" style="color:var(--red);">2.3<span style="font-size:14px;font-weight:400;">%</span></div>
+        <div class="kpi-dlt up">▲ 0.8pp above norm</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-lbl">Calls / Minute</div>
+        <div class="kpi-val" style="color:var(--cyan);"><span data-count="2847">0</span></div>
+        <div class="kpi-dlt dn">▼ 3% — within normal</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-lbl">Health Score</div>
+        <div class="kpi-val" style="color:var(--green);">87<span style="font-size:14px;font-weight:400;">%</span></div>
+        <div class="kpi-dlt neu">3 active violations</div>
+      </div>
+    </div>
+
+    <div class="charts-row">
+      <!-- Main time-series chart -->
+      <div class="cpanel">
+        <div class="cpanel-title">
+          Response Time — Overall Application Performance
+          <span class="cpanel-sub">avg · p95 · p99</span>
+        </div>
+        <svg class="csvg" id="rt-svg" viewBox="0 0 560 100" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="rtfill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#FFB300" stop-opacity=".22"/>
+              <stop offset="100%" stop-color="#FFB300" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <!-- grid -->
+          <line x1="38" y1="20" x2="560" y2="20" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+          <line x1="38" y1="42" x2="560" y2="42" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+          <line x1="38" y1="64" x2="560" y2="64" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+          <text x="2" y="23"  font-family="JetBrains Mono" font-size="7" fill="#475569">400ms</text>
+          <text x="2" y="45"  font-family="JetBrains Mono" font-size="7" fill="#475569">300ms</text>
+          <text x="2" y="67"  font-family="JetBrains Mono" font-size="7" fill="#475569">200ms</text>
+          <text x="2" y="96"  font-family="JetBrains Mono" font-size="7" fill="#475569">100ms</text>
+          <!-- p99 (spiky, red) -->
+          <path id="p99l" d="M38,55 C65,50 82,16 118,12 C148,8 162,40 195,36 C225,32 244,7 278,4 C306,1 325,28 355,22 C385,17 405,4 435,7 C458,10 478,32 510,27 C530,23 546,14 560,17" fill="none" stroke="rgba(255,23,68,0.35)" stroke-width="1" stroke-dasharray="900" stroke-dashoffset="900"/>
+          <!-- avg area -->
+          <path d="M38,74 C65,70 82,44 118,40 C148,36 162,62 195,57 C225,52 244,32 278,29 C306,26 325,52 355,47 C385,42 405,27 435,31 C458,35 478,55 510,50 C530,46 546,38 560,41 L560,100 L38,100 Z" fill="url(#rtfill)"/>
+          <!-- avg line (amber) -->
+          <path id="avgl" d="M38,74 C65,70 82,44 118,40 C148,36 162,62 195,57 C225,52 244,32 278,29 C306,26 325,52 355,47 C385,42 405,27 435,31 C458,35 478,55 510,50 C530,46 546,38 560,41" fill="none" stroke="#FFB300" stroke-width="2" stroke-dasharray="900" stroke-dashoffset="900"/>
+          <!-- baseline -->
+          <line x1="38" y1="63" x2="560" y2="63" stroke="rgba(0,229,255,0.2)" stroke-width="1" stroke-dasharray="4 3"/>
+          <text x="520" y="60" font-family="JetBrains Mono" font-size="6.5" fill="rgba(0,229,255,0.6)">baseline</text>
+          <!-- threshold -->
+          <line x1="38" y1="36" x2="560" y2="36" stroke="rgba(255,23,68,0.35)" stroke-width="1" stroke-dasharray="4 3"/>
+          <text x="516" y="33" font-family="JetBrains Mono" font-size="6.5" fill="rgba(255,23,68,0.6)">threshold</text>
+          <!-- x ticks -->
+          <text x="38"  y="98" font-family="JetBrains Mono" font-size="6.5" fill="#475569" text-anchor="middle">-30m</text>
+          <text x="155" y="98" font-family="JetBrains Mono" font-size="6.5" fill="#475569" text-anchor="middle">-20m</text>
+          <text x="278" y="98" font-family="JetBrains Mono" font-size="6.5" fill="#475569" text-anchor="middle">-10m</text>
+          <text x="420" y="98" font-family="JetBrains Mono" font-size="6.5" fill="#475569" text-anchor="middle">-5m</text>
+          <text x="545" y="98" font-family="JetBrains Mono" font-size="6.5" fill="#475569" text-anchor="middle">now</text>
+        </svg>
+      </div>
+
+      <!-- BT list -->
+      <div class="cpanel">
+        <div class="cpanel-title">Top Business Transactions</div>
+        <div class="bt-list">
+          <div class="bt-row">
+            <span class="bt-name">/api/checkout</span>
+            <span class="bt-rt" style="color:var(--red);">842ms</span>
+            <span class="bt-c">1.2K/m</span>
+            <div class="bt-bw"><div class="bt-b" data-w="92" style="background:var(--red);"></div></div>
+          </div>
+          <div class="bt-row">
+            <span class="bt-name">/api/product/{id}</span>
+            <span class="bt-rt" style="color:var(--amber);">391ms</span>
+            <span class="bt-c">3.4K/m</span>
+            <div class="bt-bw"><div class="bt-b" data-w="45" style="background:var(--amber);"></div></div>
+          </div>
+          <div class="bt-row">
+            <span class="bt-name">/api/cart</span>
+            <span class="bt-rt" style="color:var(--green);">128ms</span>
+            <span class="bt-c">5.1K/m</span>
+            <div class="bt-bw"><div class="bt-b" data-w="18" style="background:var(--green);"></div></div>
+          </div>
+          <div class="bt-row">
+            <span class="bt-name">/api/search</span>
+            <span class="bt-rt" style="color:var(--green);">95ms</span>
+            <span class="bt-c">8.9K/m</span>
+            <div class="bt-bw"><div class="bt-b" data-w="12" style="background:var(--green);"></div></div>
+          </div>
+          <div class="bt-row">
+            <span class="bt-name">/api/user/profile</span>
+            <span class="bt-rt" style="color:var(--cyan);">223ms</span>
+            <span class="bt-c">2.7K/m</span>
+            <div class="bt-bw"><div class="bt-b" data-w="28" style="background:var(--cyan);"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S5 — ALERTS
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s5">
+  <div class="bg-dots" style="opacity:.35;"></div>
+  <div style="width:100%;max-width:960px;position:relative;z-index:2;">
+    <div class="eyebrow">Health Rules</div>
+    <h2 class="h2">Alerts &amp; <span class="ac">Violations</span></h2>
+    <p class="sub">Live health rule violations via <code style="font-family:var(--fM);color:var(--cyan);background:var(--cyan-d);padding:2px 7px;border-radius:3px;font-size:12px;">appd_get_health_violations</code> — correlated by <code style="font-family:var(--fM);color:var(--cyan);background:var(--cyan-d);padding:2px 7px;border-radius:3px;font-size:12px;">appd_diagnose_issue</code>.</p>
+    <div class="alerts-grid">
+
+      <div class="ac crit">
+        <div class="ac-head">
+          <div class="pd gr"></div>
+          <span class="ac-sev">CRITICAL</span>
+          <span class="ac-title">Avg Response Time — Checkout Tier</span>
+          <span class="ac-time">12m ago</span>
+        </div>
+        <div class="ac-cond">Condition: Avg RT <span class="hr">&gt; 500ms</span> for 3 eval periods<br>Affected: <span class="ha">SuperCarStore</span> / CheckoutService / 4 nodes</div>
+        <div class="ac-metrics">
+          <div class="am"><div class="am-val" style="color:var(--red);">842ms</div><div class="am-key">Current</div></div>
+          <div class="am"><div class="am-val" style="color:var(--amber);">500ms</div><div class="am-key">Threshold</div></div>
+          <div class="am"><div class="am-val" style="color:var(--text2);">210ms</div><div class="am-key">Baseline</div></div>
+        </div>
+      </div>
+
+      <div class="ac warn">
+        <div class="ac-head">
+          <div class="pd ga"></div>
+          <span class="ac-sev">WARNING</span>
+          <span class="ac-title">Error Rate — PaymentService</span>
+          <span class="ac-time">6m ago</span>
+        </div>
+        <div class="ac-cond">Condition: Error Rate <span class="ha">&gt; 1.5%</span> for 2 eval periods<br>Affected: <span class="ha">SuperCarStore</span> / PaymentService / 2 nodes</div>
+        <div class="ac-metrics">
+          <div class="am"><div class="am-val" style="color:var(--amber);">2.3%</div><div class="am-key">Current</div></div>
+          <div class="am"><div class="am-val" style="color:var(--amber);">1.5%</div><div class="am-key">Threshold</div></div>
+          <div class="am"><div class="am-val" style="color:var(--text2);">0.4%</div><div class="am-key">Baseline</div></div>
+        </div>
+      </div>
+
+      <div class="ac info">
+        <div class="ac-head">
+          <div class="pd gc"></div>
+          <span class="ac-sev">INFO</span>
+          <span class="ac-title">Calls/min Spike — SearchAPI</span>
+          <span class="ac-time">2m ago</span>
+        </div>
+        <div class="ac-cond">Condition: Calls/min <span class="hc">&gt; 10K</span> for 1 eval period<br>Affected: <span class="hc">SuperCarStore</span> / SearchService</div>
+        <div class="ac-metrics">
+          <div class="am"><div class="am-val" style="color:var(--cyan);">11.4K</div><div class="am-key">Current</div></div>
+          <div class="am"><div class="am-val" style="color:var(--cyan);">10K</div><div class="am-key">Threshold</div></div>
+          <div class="am"><div class="am-val" style="color:var(--text2);">8.9K</div><div class="am-key">Baseline</div></div>
+        </div>
+      </div>
+
+      <div class="ac ok">
+        <div class="ac-head">
+          <div class="pd gg"></div>
+          <span class="ac-sev">RESOLVED</span>
+          <span class="ac-title">DB Connection Pool — DBTier</span>
+          <span class="ac-time">34m ago</span>
+        </div>
+        <div class="ac-cond">Condition: DB pool usage <span class="hg">&gt; 85%</span><br>Resolved after 8min — auto-scaling triggered</div>
+        <div class="ac-metrics">
+          <div class="am"><div class="am-val" style="color:var(--green);">42%</div><div class="am-key">Current</div></div>
+          <div class="am"><div class="am-val" style="color:var(--text2);">85%</div><div class="am-key">Threshold</div></div>
+          <div class="am"><div class="am-val" style="color:var(--green);">✓ OK</div><div class="am-key">Status</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S6 — 23 TOOLS
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s6">
+  <div class="bg-grid" style="opacity:.35;"></div>
+  <div style="width:100%;max-width:960px;position:relative;z-index:2;">
+    <div class="eyebrow">Complete Coverage</div>
+    <h2 class="h2">23 <span class="ac">Tools</span></h2>
+    <div class="tools-grid">
+      <div class="tc">
+        <div class="tc-head"><div class="tc-dot" style="background:var(--cyan);"></div><span class="tc-name">Discovery &amp; Health</span><span class="tc-count">4 tools</span></div>
+        <div class="tl">
+          <div class="ti">appd_get_applications</div>
+          <div class="ti">appd_get_health_rules</div>
+          <div class="ti">appd_get_health_violations</div>
+          <div class="ti">appd_get_anomalies</div>
+        </div>
+      </div>
+      <div class="tc">
+        <div class="tc-head"><div class="tc-dot" style="background:var(--purple);"></div><span class="tc-name">Performance</span><span class="tc-count">4 tools</span></div>
+        <div class="tl">
+          <div class="ti">appd_get_business_transactions</div>
+          <div class="ti">appd_get_bt_performance</div>
+          <div class="ti">appd_get_service_endpoints</div>
+          <div class="ti">appd_get_service_endpoint_perf</div>
+        </div>
+      </div>
+      <div class="tc">
+        <div class="tc-head"><div class="tc-dot" style="background:var(--amber);"></div><span class="tc-name">Infrastructure</span><span class="tc-count">2 tools</span></div>
+        <div class="tl">
+          <div class="ti">appd_get_tiers_and_nodes</div>
+          <div class="ti">appd_get_backends</div>
+        </div>
+      </div>
+      <div class="tc">
+        <div class="tc-head"><div class="tc-dot" style="background:var(--red);"></div><span class="tc-name">Diagnostics</span><span class="tc-count">3 tools</span></div>
+        <div class="tl">
+          <div class="ti">appd_get_snapshots</div>
+          <div class="ti">appd_get_errors</div>
+          <div class="ti">appd_diagnose_issue</div>
+        </div>
+      </div>
+      <div class="tc">
+        <div class="tc-head"><div class="tc-dot" style="background:var(--green);"></div><span class="tc-name">Metrics</span><span class="tc-count">2 tools</span></div>
+        <div class="tl">
+          <div class="ti">appd_get_metric_data</div>
+          <div class="ti">appd_browse_metric_tree</div>
+        </div>
+      </div>
+      <div class="tc" style="border-color:rgba(0,229,255,0.18);">
+        <div class="tc-head"><div class="tc-dot" style="background:var(--cyan);box-shadow:0 0 6px var(--cyan);"></div><span class="tc-name">Dashboards</span><span class="tc-count" style="color:var(--cyan);">10 tools</span></div>
+        <div class="tl">
+          <div class="ti">appd_get_dashboards / get_dashboard</div>
+          <div class="ti">appd_create / update / clone / delete</div>
+          <div class="ti">appd_add_widget_to_dashboard</div>
+          <div class="ti">appd_export / import / save_file</div>
+          <div class="ti" style="color:var(--cyan);">appd_auto_build_dashboard ✨</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S7 — DASHBOARD FORMATS
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s7">
+  <div class="bg-dots" style="opacity:.3;"></div>
+  <div style="width:100%;max-width:880px;position:relative;z-index:2;">
+    <div class="eyebrow">Dashboard API</div>
+    <h2 class="h2">Two <span class="ac">Widget Formats</span></h2>
+    <p class="sub">AppDynamics exposes two distinct APIs with incompatible widget schemas. They must never be mixed.</p>
+    <div class="fmt-split">
+      <div class="fmt">
+        <div style="margin-bottom:6px;"><span class="badge bc">Export Format</span></div>
+        <div class="fmt-title" style="color:var(--cyan);">Import / Export / Auto-Build</div>
+        <div class="fmt-uses">Used by: auto_build · import · save_file</div>
+        <div class="fmt-props">
+          <div class="fp"><span class="fp-k">Top-level</span><span class="fp-v">widgetTemplates</span></div>
+          <div class="fp"><span class="fp-k">Widget type</span><span class="fp-v">GaugeWidget / GraphWidget</span></div>
+          <div class="fp"><span class="fp-k">Metrics in</span><span class="fp-v">dataSeriesTemplates[]</span></div>
+          <div class="fp"><span class="fp-k">Endpoint</span><span class="fp-v">CustomDashboardImportExportServlet</span></div>
+          <div class="fp"><span class="fp-k">Function</span><span class="fp-v">buildExportWidgetPayload()</span></div>
+        </div>
+      </div>
+      <div class="fmt">
+        <div style="margin-bottom:6px;"><span class="badge bp">RESTUI Format</span></div>
+        <div class="fmt-title" style="color:var(--purple);">Create / Update / Add Widget</div>
+        <div class="fmt-uses">Used by: create · update · add_widget</div>
+        <div class="fmt-props">
+          <div class="fp"><span class="fp-k">Top-level</span><span class="fp-v">widgets</span></div>
+          <div class="fp"><span class="fp-k">Widget type</span><span class="fp-v">GAUGE / TIMESERIES_GRAPH</span></div>
+          <div class="fp"><span class="fp-k">Metrics in</span><span class="fp-v">widgetsMetricMatchCriterias[]</span></div>
+          <div class="fp"><span class="fp-k">Endpoint</span><span class="fp-v">/restui/dashboards/createDashboard</span></div>
+          <div class="fp"><span class="fp-k">Function</span><span class="fp-v">buildWidgetPayload()</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="warn-banner">
+      <span style="font-size:15px;">⚠</span>
+      Import servlet always drops metric bindings — two-step RESTUI metric binding required post-import
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S8 — ROOT CAUSE ANALYSIS
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s8">
+  <div class="bg-grid" style="opacity:.38;"></div>
+  <div style="width:100%;max-width:900px;position:relative;z-index:2;">
+    <div class="eyebrow">Composite Tool</div>
+    <h2 class="h2">Root Cause <span class="ac">Analysis</span></h2>
+    <p class="sub"><code style="font-family:var(--fM);color:var(--cyan);background:var(--cyan-d);padding:2px 7px;border-radius:3px;font-size:12px;">appd_diagnose_issue</code> — automated two-phase investigation engine</p>
+    <div class="rca-grid">
+      <div class="rca-phase">
+        <div class="rca-pbadge" style="color:var(--cyan);"><div class="pd gc" style="width:6px;height:6px;"></div>PHASE 1</div>
+        <div class="rca-ptitle">Data Collection</div>
+        <div class="rca-steps">
+          <div class="rca-step"><div class="rca-num">1</div><div class="rca-txt">Fetch active &amp; recent health rule violations</div></div>
+          <div class="rca-step"><div class="rca-num">2</div><div class="rca-txt">Get business transaction performance metrics</div></div>
+          <div class="rca-step"><div class="rca-num">3</div><div class="rca-txt">Pull service endpoint response times</div></div>
+          <div class="rca-step"><div class="rca-num">4</div><div class="rca-txt">Retrieve error counts &amp; diagnostic snapshots</div></div>
+          <div class="rca-step"><div class="rca-num">5</div><div class="rca-txt">Collect tier &amp; node infrastructure status</div></div>
+        </div>
+      </div>
+      <div class="rca-phase">
+        <div class="rca-pbadge" style="color:var(--green);"><div class="pd gg" style="width:6px;height:6px;"></div>PHASE 2</div>
+        <div class="rca-ptitle">RCA Synthesis</div>
+        <div class="rca-steps">
+          <div class="rca-step"><div class="rca-num">1</div><div class="rca-txt">Correlate violations with BT degradation patterns</div></div>
+          <div class="rca-step"><div class="rca-num">2</div><div class="rca-txt">Identify slow endpoints &amp; error hotspot tiers</div></div>
+          <div class="rca-step"><div class="rca-num">3</div><div class="rca-txt">Cross-reference infrastructure and backend health</div></div>
+          <div class="rca-step"><div class="rca-num">4</div><div class="rca-txt">Rank probable root causes by impact &amp; confidence</div></div>
+          <div class="rca-step"><div class="rca-num">5</div><div class="rca-txt">Generate prioritized remediation recommendations</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════
+     S9 — GET STARTED
+════════════════════════════════════════════════════════════ -->
+<section class="slide" id="s9">
+  <div class="bg-dots" style="opacity:.38;"></div>
+  <div style="width:100%;max-width:960px;position:relative;z-index:2;">
+    <div class="eyebrow">Quick Start</div>
+    <h2 class="h2">Get <span class="ac">Started</span></h2>
+    <div class="gs-grid">
+      <div class="term">
+        <div class="term-bar">
+          <div class="tdot" style="background:#ff5f57;"></div>
+          <div class="tdot" style="background:#ffbd2e;"></div>
+          <div class="tdot" style="background:#28ca41;"></div>
+          <span class="term-lbl">bash — appdynamics-mcp-server</span>
+        </div>
+        <div class="term-body">
+          <div><span class="tp">$ </span><span class="tc2">npm install</span></div>
+          <div style="padding-left:2px;"><span class="to">added 47 packages in 3.2s ✓</span></div>
+          <div style="margin-top:4px;"><span class="tp">$ </span><span class="tc2">npm run build</span></div>
+          <div style="padding-left:2px;"><span class="to">tsc → dist/ compiled ✓</span></div>
+          <div style="margin-top:4px;"><span class="tp">$ </span><span class="tc2">npx tsx src/index.ts</span></div>
+          <div style="padding-left:2px;"><span class="toc">AppDynamics MCP Server starting...</span></div>
+          <div style="padding-left:2px;"><span class="toc">OAuth2 token acquired ✓</span></div>
+          <div style="padding-left:2px;"><span class="to">Registered 23 tools ✓</span></div>
+          <div style="padding-left:2px;"><span class="to">Listening on stdio transport</span></div>
+          <div style="padding-left:2px;color:var(--text2);">Ready for MCP clients<span class="cur"></span></div>
+        </div>
+      </div>
+      <div class="gs-r">
+        <div class="env-card">
+          <div class="env-title">Environment Variables</div>
+          <div class="ev">
+            <div class="ev-name">APPD_URL <span class="badge br" style="font-size:8px;">required</span></div>
+            <div class="ev-val">https://your-account.saas.appdynamics.com</div>
+          </div>
+          <div class="ev">
+            <div class="ev-name">APPD_CLIENT_NAME <span class="badge br" style="font-size:8px;">required</span></div>
+            <div class="ev-val">myOAuthClient</div>
+          </div>
+          <div class="ev">
+            <div class="ev-name">APPD_CLIENT_SECRET <span class="badge bc" style="font-size:8px;">optional</span></div>
+            <div class="ev-val">••••••••••••••••</div>
+          </div>
+          <div class="ev">
+            <div class="ev-name">APPD_ACCOUNT_NAME <span class="badge bc" style="font-size:8px;">optional</span></div>
+            <div class="ev-val">customer1</div>
+          </div>
+        </div>
+        <div class="sum-stats">
+          <div class="ss"><div class="ss-n" style="color:var(--cyan);" data-count="23">0</div><div class="ss-l">MCP Tools</div></div>
+          <div class="ss"><div class="ss-n" style="color:var(--green);" data-count="10">0</div><div class="ss-l">Dash Tools</div></div>
+          <div class="ss"><div class="ss-n" style="color:var(--amber);">ES<span style="font-size:14px;">6</span></div><div class="ss-l">TypeScript</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div><!-- /deck -->
+
+<script>
+// ── NAVIGATION ─────────────────────────────────────────────────────
+const slides = [...document.querySelectorAll('.slide')];
+const N = slides.length;
+let cur = 0, busy = false;
+
+function go(dir) {
+  const nxt = cur + dir;
+  if (busy || nxt < 0 || nxt >= N) return;
+  busy = true;
+
+  const from = slides[cur];
+  const to   = slides[nxt];
+
+  // position 'to' off-screen instantly (no transition)
+  to.classList.add('no-tr');
+  to.style.transform = `translateX(${dir > 0 ? 60 : -60}px)`;
+  to.style.opacity = '0';
+  to.style.pointerEvents = 'none';
+  to.getBoundingClientRect(); // force reflow
+
+  // slide 'from' out
+  from.classList.remove('active');
+  from.style.transform = `translateX(${dir > 0 ? -60 : 60}px)`;
+  from.style.opacity = '0';
+
+  // slide 'to' in
+  to.classList.remove('no-tr');
+  to.style.transform = '';
+  to.style.opacity = '';
+  to.style.pointerEvents = '';
+  to.classList.add('active');
+
+  setTimeout(() => {
+    from.style.transform = '';
+    from.style.opacity = '';
+    cur = nxt;
+    busy = false;
+    updateUI();
+    onEnter(nxt);
+  }, 620);
+
+  updateUI(nxt);
+}
+
+function goTo(n) { go(n - cur); }
+
+function updateUI(n = cur) {
+  document.getElementById('prog').style.width = ((n + 1) / N * 100) + '%';
+  document.getElementById('cn').textContent = String(n + 1).padStart(2, '0');
+  document.querySelectorAll('.dot').forEach((d, i) => d.classList.toggle('on', i === n));
+}
+
+// build dots
+const dotsEl = document.getElementById('dots');
+for (let i = 0; i < N; i++) {
+  const d = document.createElement('div');
+  d.className = 'dot' + (i === 0 ? ' on' : '');
+  d.onclick = () => goTo(i);
+  dotsEl.appendChild(d);
+}
+
+// keyboard
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') go(1);
+  if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')  go(-1);
+});
+
+// touch
+let tx = 0;
+document.addEventListener('touchstart', e => tx = e.touches[0].clientX, { passive: true });
+document.addEventListener('touchend',   e => {
+  const dx = tx - e.changedTouches[0].clientX;
+  if (Math.abs(dx) > 50) go(dx > 0 ? 1 : -1);
+}, { passive: true });
+
+// ── ANIMATIONS ─────────────────────────────────────────────────────
+function countUp(el, target, ms = 1100) {
+  const t0 = performance.now();
+  const tick = now => {
+    const p = Math.min((now - t0) / ms, 1);
+    const e = 1 - Math.pow(1 - p, 3);
+    el.textContent = Math.round(e * target);
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function drawSVGPath(el, delay = 0) {
+  const len = 900;
+  el.style.transition = 'none';
+  el.style.strokeDasharray = len;
+  el.style.strokeDashoffset = len;
+  setTimeout(() => {
+    el.style.transition = `stroke-dashoffset 1.8s cubic-bezier(.4,0,.2,1)`;
+    el.style.strokeDashoffset = '0';
+  }, delay);
+}
+
+function animateBars() {
+  document.querySelectorAll('#s4 .bt-b').forEach((b, i) => {
+    const w = b.dataset.w;
+    b.style.width = w + '%';
+    b.style.transform = 'scaleX(0)';
+    b.style.transformOrigin = 'left';
+    b.style.transition = 'none';
+    setTimeout(() => {
+      b.style.transition = `transform .85s cubic-bezier(.4,0,.2,1)`;
+      b.style.transform = 'scaleX(1)';
+    }, 300 + i * 110);
+  });
+}
+
+function onEnter(n) {
+  if (n === 0) {
+    // title count-ups
+    document.querySelectorAll('#s1 [data-count]').forEach(el => countUp(el, +el.dataset.count, 1200));
+    // mini sparkline
+    const ml = document.getElementById('mline');
+    if (ml) drawSVGPath(ml, 800);
+  }
+  if (n === 3) {
+    // dashboard: charts + KPI counts + bars
+    const avgl = document.getElementById('avgl');
+    const p99l = document.getElementById('p99l');
+    if (avgl) drawSVGPath(avgl, 100);
+    if (p99l) drawSVGPath(p99l, 350);
+    document.querySelectorAll('#s4 [data-count]').forEach(el => countUp(el, +el.dataset.count, 1000));
+    animateBars();
+  }
+  if (n === 8) {
+    document.querySelectorAll('#s9 [data-count]').forEach(el => countUp(el, +el.dataset.count, 1000));
+  }
+}
+
+// ── INIT ───────────────────────────────────────────────────────────
+slides[0].classList.add('active');
+setTimeout(() => onEnter(0), 350);
+</script>
+</body>
+</html>
