@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-AppDynamics MCP Server — a Model Context Protocol server that exposes AppDynamics SaaS REST API data to MCP-compatible clients (Cursor, Claude Desktop, etc.). Provides 27 tools covering application monitoring, diagnostics, metric browsing, full dashboard CRUD, auto-build dashboards, dashboard import/export/file-save, health rule CRUD, and automated root cause analysis.
+AppDynamics MCP Server — a Model Context Protocol server that exposes AppDynamics SaaS REST API data to MCP-compatible clients (Cursor, Claude Desktop, etc.). Provides 30 tools covering application monitoring, diagnostics, metric browsing, full dashboard CRUD, auto-build dashboards, dashboard import/export/file-save, health rule CRUD, and automated root cause analysis.
 
 ## Running
 
@@ -28,6 +28,8 @@ src/
 ├── utils/
 │   ├── error-handler.ts  # Centralized error → MCP response conversion
 │   ├── app-resolver.ts   # Application name → ID resolver with cache
+│   ├── time-range.ts     # Shared time-range schema → AppD query params
+│   ├── concurrency.ts    # mapWithConcurrency — bounded fan-out
 │   └── formatting.ts     # Response truncation, timestamp formatting, tables
 └── tools/
     ├── applications.ts        # appd_get_applications
@@ -47,7 +49,18 @@ src/
     │                          # appd_update_dashboard, appd_add_widget_to_dashboard,
     │                          # appd_clone_dashboard, appd_delete_dashboard, appd_export_dashboard,
     │                          # appd_auto_build_dashboard
+    ├── dashboard-payloads.ts  # Pure widget/dashboard payload builders (no I/O, unit-tested)
     └── root-cause.ts          # appd_diagnose_issue
+
+test/
+├── dashboard-payloads.test.ts # Vitest unit tests for the payload builders
+├── time-range.test.ts         # Range-type selection, timestamp parsing, validation
+├── formatting.test.ts         # Response truncation stays within CHARACTER_LIMIT
+├── auth.test.ts               # Token caching, in-flight dedupe, invalidation
+├── concurrency.test.ts        # Order preservation and concurrency ceiling
+├── error-handler.test.ts      # Status mapping and error-body capping
+└── fixtures/                  # RESTUI + export JSON captured from real working dashboards
+                                # (ground truth for widget/metric criteria shapes)
 ```
 
 ### Key Design Decisions
@@ -66,7 +79,7 @@ src/
 - Token cached with 5-minute safety margin before expiry
 - **Fallback**: Direct API key if only `APPD_CLIENT_NAME` is set (no secret)
 
-### Tools Summary (27 total)
+### Tools Summary (30 total)
 
 | Category | Tools |
 |---|---|
@@ -97,6 +110,38 @@ src/
 - All API calls go through `services/api-client.ts` for consistent auth and error handling
 - Dashboard APIs use `/restui/` endpoints (not the standard `/rest/` prefix)
 
+### Time ranges
+
+Never hardcode `time-range-type` / `duration-in-mins` in a tool. Spread
+`TimeRangeSchema` into the tool's `inputSchema` and call `resolveTimeRange(input, DEFAULT)`,
+then spread `range.params` into the `appdGet` call. The helper picks the correct AppD
+range type from which arguments were supplied:
+
+| Supplied | Range type |
+|---|---|
+| *(none)* / `durationInMins` | `BEFORE_NOW` |
+| `startTime` + `endTime` | `BETWEEN_TIMES` |
+| `endTime` [+ `durationInMins`] | `BEFORE_TIME` |
+| `startTime` [+ `durationInMins`] | `AFTER_TIME` |
+
+`resolveTimeRange` throws on contradictory input (all three arguments) or an inverted
+window; the tool's existing `catch` → `handleError` surfaces the message. Use
+`range.description` for any human-readable `timeRange` field, and `precedingWindow(range)`
+when a baseline comparison window is needed (see `root-cause.ts`).
+
+Verified live: all four range types are accepted by `/rest/applications/{id}/metric-data`.
+Note that AppDynamics rolls older data into coarser buckets — a narrow window far in the
+past can return nothing while a wider window over the same period returns one aggregate
+bucket labelled with the **window start**, not the data's actual timestamp.
+
+### Auth and fan-out
+
+- `getAccessToken()` shares one in-flight OAuth request across concurrent callers;
+  `invalidateToken()` clears the cache and is called by `api-client` on a 401 (retried once).
+- Multipart requests (`appdPostFormData`) opt out of the 401 retry — the body cannot be replayed.
+- Any tool that iterates all applications or tiers must use `mapWithConcurrency`, never a
+  bare `Promise.all` over the full list.
+
 ### Dashboard Widget Format Systems
 
 AppDynamics has **two distinct widget formats** — do not mix them:
@@ -110,6 +155,54 @@ AppDynamics has **two distinct widget formats** — do not mix them:
 | Top-level key | `widgetTemplates` | `widgets` |
 
 `buildExportWidgetPayload()` produces export format; `buildWidgetPayload()` produces RESTUI format.
+Both live in `src/tools/dashboard-payloads.ts` (pure, unit-tested — keep them free of I/O).
+
+### Widget rendering rules (learned from live-API interrogation + working dashboards)
+
+These are load-bearing: getting any of them wrong makes widgets save "successfully" but render empty.
+
+- **Valid RESTUI widget `type` enum**: ANALYTICS, FLOWMAP, GAUGE, HEALTH_LIST, IFRAME, IMAGE,
+  ISSUE_TRACKING, LABEL, LIST, LOG_TAIL, METRIC_LABEL, MULTI_SERIES_HEALTH_STATUS, PIE,
+  STATUS_LIGHT, STREAMING_GRAPH, SUPER, TIMESERIES_GRAPH.
+  `TEXT` and `METRIC_VALUE` are **not valid** — the MCP tools accept them as aliases and map
+  them to `LABEL` / `METRIC_LABEL` via `toRestuiWidgetType()`.
+- **HEALTH_LIST scoping** (green/yellow/red circles): `entitySelectionType: "SPECIFIED"` +
+  `entityIds: [healthRuleIds]` + `entityType: "POLICY"`; use `"ALL"` to show every rule.
+  The import servlet drops this, so create/import flows re-patch via `patchHealthListWidgets()`.
+- **HEALTH_LIST display modes**: `showPie` and `showBarPie` are mutually exclusive
+  (`showPie: true` + `showBarPie: false` = pie chart; add `innerRadius: 30-40` for a donut;
+  `showList: false` hides the rule list). Exposed on the widget schema as
+  `showPie`/`innerRadius`/`showList` and re-applied post-import by `patchHealthListWidgets()`.
+- **Metric criteria** (`buildRestuiMetricSeries`) — three forms, each verified live against
+  `POST /restui/dashboards/widgetData` (the endpoint the dashboard UI renders from):
+  - **BT paths WITH btIds**: `BT_AFFECTED_EMC`/`SPECIFIC` + `TIER_AVERAGE`, `inputMetricText: false`,
+    path stored as `Root||Business Transaction Performance||<leaf>`.
+  - **App-scope paths** (Overall Application Performance, Backends, Service Endpoints, Errors,
+    and BT paths WITHOUT btIds): `OVERALL_AFFECTED_EMC` with `type: "APPLICATION"` (or
+    `"SPECIFIC_TIERS"` + `componentIds` when tierIds given), `inputMetricText: false`,
+    path `Root||<category>||<rest>`, metricType/scope null. This resolves the true
+    `BTM|Application Summary|<metric>` aggregate. BT-style criteria for these paths render
+    one series per BT on graphs and `--` on labels; the typed-absolute INFRA form returns no data.
+  - **Node metrics** (JVM, Hardware Resources, Agent, Custom Metrics, or
+    `Application Infrastructure Performance|<tier>|<rest>`): `INFRASTRUCTURE_AFFECTED_EMC`/`NODES`/`ANY`
+    with the **node-relative** path (`toNodeRelativePath` strips the `AIP|<tier>|` prefix) typed as
+    text (`inputMetricText: true`). Absolute AIP paths return no data in any other form.
+  - `rollupMetricData`: `false` for TIMESERIES_GRAPH, `true` for value widgets (METRIC_LABEL/GAUGE/PIE).
+  - NOTE: `GET /rest/applications/{id}/metric-data` and dashboard `widgetData` resolve paths
+    DIFFERENTLY — a path returning data in metric-data can still render empty on a dashboard.
+    `widgetData` only works with a browser session (500s under OAuth tokens).
+- **Two-step bind**: new widgets are saved without criteria, then criteria are bound in a second
+  `updateDashboard` using the **server-assigned** widget `id`/`guid` (client-generated ids → 500).
+- Health rules come from `/controller/alerting/rest/v1/applications/{id}/health-rules`
+  (the legacy `/rest/applications/{id}/health-rules` returns 400).
+
+## Testing
+
+- `npm test` — vitest unit tests for the payload builders against `test/fixtures/` ground truth
+- `node scripts/verify-dashboard-fixes.mjs` — end-to-end: drives the real MCP server over stdio,
+  creates dashboards on the live controller, asserts persisted RESTUI shapes and metric data.
+  Requires `APPD_URL`, `APPD_CLIENT_NAME`, `APPD_CLIENT_SECRET`, `APPD_ACCOUNT_NAME` env vars.
+  Delete the `MCP * Verification *` dashboards it creates after reviewing them.
 
 ## Guidelines
 

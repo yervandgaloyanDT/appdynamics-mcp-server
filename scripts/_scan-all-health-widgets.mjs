@@ -3,6 +3,7 @@
  * Looking for any that have non-empty entityIds or unusual configuration.
  */
 import https from "https";
+import { tokenFormBody } from "./_appd-env.mjs";
 const BASE = "https://experience.saas.appdynamics.com";
 
 function rawReq(method, urlStr, body, headers) {
@@ -22,7 +23,7 @@ function rawReq(method, urlStr, body, headers) {
   });
 }
 const tokR = await rawReq("POST", `${BASE}/controller/api/oauth/access_token`,
-  "grant_type=client_credentials&client_id=mcpV2%40experience&client_secret=REDACTED-ROTATED-SECRET",
+  tokenFormBody(),
   { "Content-Type": "application/x-www-form-urlencoded" });
 const tok = tokR.body.access_token;
 const H = { "Authorization": `Bearer ${tok}`, "Accept": "application/json" };

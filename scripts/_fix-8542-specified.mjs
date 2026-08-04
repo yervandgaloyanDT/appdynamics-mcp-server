@@ -7,6 +7,7 @@
  *   properties: []  (no selectedEntityIds property needed)
  */
 import https from "https";
+import { tokenFormBody } from "./_appd-env.mjs";
 const BASE    = "https://experience.saas.appdynamics.com";
 
 function rawReq(method, urlStr, body, headers) {
@@ -29,7 +30,7 @@ let _tok = null;
 async function getToken() {
   if (_tok) return _tok;
   const r = await rawReq("POST", `${BASE}/controller/api/oauth/access_token`,
-    "grant_type=client_credentials&client_id=mcpV2%40experience&client_secret=REDACTED-ROTATED-SECRET",
+    tokenFormBody(),
     { "Content-Type": "application/x-www-form-urlencoded" });
   _tok = r.body.access_token; return _tok;
 }

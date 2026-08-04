@@ -10,9 +10,9 @@ import { resolveAppId } from "../utils/app-resolver.js";
 import { handleError, textResponse } from "../utils/error-handler.js";
 import { truncateIfNeeded } from "../utils/formatting.js";
 import type { HealthRule, HealthRulePayload, HealthRuleCondition } from "../types.js";
+import { healthRulesApiPath } from "../constants.js";
 
-const ALERTING_BASE = (appId: number) =>
-  `/controller/alerting/rest/v1/applications/${appId}/health-rules`;
+const ALERTING_BASE = healthRulesApiPath;
 
 // ── Shared schemas ────────────────────────────────────────────────────────────
 
@@ -178,7 +178,7 @@ export function registerHealthRuleTools(server: McpServer): void {
 
 Health rules define the thresholds and conditions that trigger violations. Understanding what health rules exist and their configuration is essential context for interpreting violations.
 
-Without healthRuleId: returns a summary list of all health rules (id, name, type, enabled, affected entity type).
+Without healthRuleId: returns a summary list of all health rules (id, name, enabled, affected entity type).
 With healthRuleId: returns the full configuration of that specific health rule including evaluation criteria.
 
 Args:
@@ -209,21 +209,18 @@ Returns: Array of health rules or single detailed health rule object.`,
 
         if (healthRuleId !== undefined) {
           const rule = await appdGet<HealthRule>(
-            `/controller/rest/applications/${appId}/health-rules/${healthRuleId}`
+            `${ALERTING_BASE(appId)}/${healthRuleId}`
           );
           return textResponse(JSON.stringify(rule, null, 2));
         }
 
-        const rules = await appdGet<HealthRule[]>(
-          `/controller/rest/applications/${appId}/health-rules`
-        );
+        const rules = await appdGet<HealthRule[]>(ALERTING_BASE(appId));
 
+        // The alerting v1 list returns id, name, enabled, affectedEntityType only
         const summary = rules.map((r) => ({
           id: r.id,
           name: r.name,
-          type: r.type,
           enabled: r.enabled,
-          isDefault: r.isDefault,
           affectedEntityType: r.affectedEntityType,
         }));
 

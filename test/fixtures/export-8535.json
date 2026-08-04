@@ -1,0 +1,9 @@
+{
+  "success": false,
+  "errors": [
+    "ID000519 Dashboard does not exist, id: 8535"
+  ],
+  "warnings": [],
+  "dashboard": null,
+  "dashboardName": null
+}

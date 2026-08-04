@@ -9,6 +9,7 @@ import { appdGet } from "../services/api-client.js";
 import { resolveAppId } from "../utils/app-resolver.js";
 import { handleError, textResponse } from "../utils/error-handler.js";
 import { truncateIfNeeded } from "../utils/formatting.js";
+import { TimeRangeSchema, resolveTimeRange } from "../utils/time-range.js";
 import { DEFAULT_DURATION_MINS } from "../constants.js";
 
 // ── Get Metric Data ────────────────────────────────────────────────────────
@@ -22,12 +23,7 @@ const MetricDataSchema = {
     .describe(
       "The metric path to query. Use appd_browse_metric_tree to discover available paths. Examples: 'Overall Application Performance|Average Response Time (ms)', 'Application Infrastructure Performance|*|Hardware Resources|CPU|%Busy'. For custom metrics use: 'Application Infrastructure Performance|{Tier}|Individual Nodes|{Node}|Custom Metrics|{MetricName}'."
     ),
-  durationInMins: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe("Time range in minutes to look back. Defaults to 60."),
+  ...TimeRangeSchema,
   rollup: z
     .boolean()
     .optional()
@@ -76,10 +72,19 @@ Use appd_browse_metric_tree to discover available metric paths first.
   'Application Infrastructure Performance|{Tier}|Individual Nodes|{Node}|Custom Metrics|{MetricName}'
 Wildcard example: 'Application Infrastructure Performance|*|Individual Nodes|*|Custom Metrics|MyMetric' with rollup=false
 
+**Time range**: omit all time arguments for the last hour, or query a specific
+historical window:
+  - startTime + endTime      → exact window (e.g. an incident between 14:00 and 15:00)
+  - endTime + durationInMins → N minutes before that point
+  - startTime + durationInMins → N minutes after that point
+Timestamps accept ISO 8601 ('2026-08-03T14:00:00Z') or epoch milliseconds.
+
 Args:
   - application (string|number): App name or ID
   - metricPath (string): Full metric path (pipe-separated)
-  - durationInMins (number, optional): Lookback in minutes (default: 60)
+  - durationInMins (number, optional): Window length in minutes (default: 60)
+  - startTime (string|number, optional): Window start — ISO 8601 or epoch ms
+  - endTime (string|number, optional): Window end — ISO 8601 or epoch ms
   - rollup (boolean, optional): Aggregate across entities (default: true). Set false for custom/per-node metrics.
 
 Returns: Array of metric data objects with timestamps, min, max, avg, count, sum values.`,
@@ -91,17 +96,19 @@ Returns: Array of metric data objects with timestamps, min, max, avg, count, sum
         openWorldHint: true,
       },
     },
-    async ({ application, metricPath, durationInMins, rollup }) => {
+    async ({ application, metricPath, durationInMins, startTime, endTime, rollup }) => {
       try {
         const appId = await resolveAppId(application);
-        const duration = durationInMins ?? DEFAULT_DURATION_MINS;
+        const range = resolveTimeRange(
+          { durationInMins, startTime, endTime },
+          DEFAULT_DURATION_MINS
+        );
 
         const data = await appdGet(
           `/controller/rest/applications/${appId}/metric-data`,
           {
             "metric-path": metricPath,
-            "time-range-type": "BEFORE_NOW",
-            "duration-in-mins": duration,
+            ...range.params,
             ...(rollup !== undefined && { rollup }),
           }
         );

@@ -4,6 +4,38 @@
 
 import type { ToolResponse } from "../types.js";
 
+/**
+ * Maximum characters of an upstream error body to echo back.
+ * AppDynamics returns full HTML error pages for some 5xx responses; without a
+ * cap a single failure can flood the model's context with markup.
+ */
+const MAX_ERROR_BODY_CHARS = 500;
+
+/**
+ * Render an upstream error body as a short, single-line snippet.
+ */
+function summarizeErrorBody(data: unknown): string {
+  if (data === undefined || data === null) return "(no response body)";
+
+  let text = typeof data === "string" ? data : safeStringify(data);
+
+  // Collapse whitespace so HTML error pages do not span dozens of lines.
+  text = text.replace(/\s+/g, " ").trim();
+
+  if (text.length > MAX_ERROR_BODY_CHARS) {
+    return `${text.slice(0, MAX_ERROR_BODY_CHARS)}… (truncated, ${text.length} chars total)`;
+  }
+  return text;
+}
+
+function safeStringify(data: unknown): string {
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return String(data);
+  }
+}
+
 interface AxiosLikeError extends Error {
   isAxiosError: boolean;
   response?: {
@@ -40,9 +72,7 @@ export function handleError(error: unknown): ToolResponse {
   if (isAxiosError(error)) {
     if (error.response) {
       const status = error.response.status;
-      const data = error.response.data;
-      const dataStr =
-        typeof data === "string" ? data : JSON.stringify(data);
+      const dataStr = summarizeErrorBody(error.response.data);
 
       switch (status) {
         case 401:

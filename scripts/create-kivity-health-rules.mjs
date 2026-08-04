@@ -15,13 +15,12 @@
 import https from "https";
 import { URL } from "url";
 import { randomUUID } from "crypto";
+import { BASE, tokenFormBody } from "./_appd-env.mjs";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const BASE_URL       = "https://experience.saas.appdynamics.com";
-const CLIENT_NAME    = "mcpV2";
-const CLIENT_SECRET  = "REDACTED-ROTATED-SECRET";
-const ACCOUNT_NAME   = "experience";
+// Credentials come from .env / the environment — never hardcode them here.
+const BASE_URL = BASE;
 
 const APP_NAME        = "Server & Infrastructure Monitoring";
 const TIER_NAME       = "Root";
@@ -74,9 +73,7 @@ let _token = null;
 
 async function getToken() {
   if (_token) return _token;
-  const id   = `${CLIENT_NAME}@${ACCOUNT_NAME}`;
-  const body = `grant_type=client_credentials&client_id=${encodeURIComponent(id)}&client_secret=${encodeURIComponent(CLIENT_SECRET)}`;
-  const res  = await rawRequest("POST", `${BASE_URL}/controller/api/oauth/access_token`, body, {
+  const res  = await rawRequest("POST", `${BASE_URL}/controller/api/oauth/access_token`, tokenFormBody(), {
     "Content-Type": "application/x-www-form-urlencoded",
   });
   _token = res.access_token;

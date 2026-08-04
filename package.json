@@ -9,12 +9,17 @@
     "dev": "npx tsx src/index.ts",
     "build": "tsc",
     "clean": "rm -rf dist",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["mcp", "appdynamics", "monitoring", "observability"],
+  "keywords": [
+    "mcp",
+    "appdynamics",
+    "monitoring",
+    "observability"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -25,6 +30,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
   }
 }

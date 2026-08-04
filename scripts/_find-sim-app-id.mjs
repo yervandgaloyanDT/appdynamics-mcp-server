@@ -1,4 +1,5 @@
 import https from "https";
+import { tokenFormBody } from "./_appd-env.mjs";
 const BASE = "https://experience.saas.appdynamics.com";
 const NODE = "ip-10-0-1-163.eu-west-1.compute.internal";
 const FULL_STATUS = `Application Infrastructure Performance|Root|Individual Nodes|${NODE}|Custom Metrics|URL Monitor|ACTIVEMQ_b2X|ACTIVEMQ_b2X_1_mglx264p|Status`;
@@ -20,7 +21,7 @@ function req(method, path, body, headers) {
   });
 }
 const tokR = await req("POST", "/controller/api/oauth/access_token",
-  "grant_type=client_credentials&client_id=mcpV2%40experience&client_secret=REDACTED-ROTATED-SECRET",
+  tokenFormBody(),
   { "Content-Type": "application/x-www-form-urlencoded" });
 const tok = tokR.body.access_token;
 const H = { "Authorization": "Bearer " + tok, "Accept": "application/json", "Content-Type": "application/json" };

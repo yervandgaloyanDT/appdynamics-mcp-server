@@ -8,6 +8,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { appdGet } from "../services/api-client.js";
 import { resolveAppId } from "../utils/app-resolver.js";
 import { handleError, textResponse } from "../utils/error-handler.js";
+import { TimeRangeSchema, resolveTimeRange } from "../utils/time-range.js";
 import { DEFAULT_DURATION_MINS, BT_METRICS } from "../constants.js";
 import type { BusinessTransaction, MetricData } from "../types.js";
 
@@ -16,12 +17,7 @@ const InputSchema = {
     .union([z.string(), z.number()])
     .describe("Application name or numeric ID."),
   btId: z.number().int().describe("The numeric ID of the business transaction."),
-  durationInMins: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe("Time range in minutes to look back. Defaults to 60."),
+  ...TimeRangeSchema,
 };
 
 export function registerBtPerformanceTools(server: McpServer): void {
@@ -35,10 +31,15 @@ Retrieves average response time, calls per minute, errors per minute, slow calls
 
 Use appd_get_business_transactions first to find the BT ID.
 
+Time range: omit all time arguments for the last hour, or specify an exact
+historical window with startTime + endTime (ISO 8601 or epoch ms).
+
 Args:
   - application (string|number): App name or ID
   - btId (number): Business transaction ID
-  - durationInMins (number, optional): Lookback in minutes (default: 60)
+  - durationInMins (number, optional): Window length in minutes (default: 60)
+  - startTime (string|number, optional): Window start — ISO 8601 or epoch ms
+  - endTime (string|number, optional): Window end — ISO 8601 or epoch ms
 
 Returns: BT details plus metric data for each performance metric.`,
       inputSchema: InputSchema,
@@ -49,10 +50,13 @@ Returns: BT details plus metric data for each performance metric.`,
         openWorldHint: true,
       },
     },
-    async ({ application, btId, durationInMins }) => {
+    async ({ application, btId, durationInMins, startTime, endTime }) => {
       try {
         const appId = await resolveAppId(application);
-        const duration = durationInMins ?? DEFAULT_DURATION_MINS;
+        const range = resolveTimeRange(
+          { durationInMins, startTime, endTime },
+          DEFAULT_DURATION_MINS
+        );
 
         // Get BT details to build metric paths
         const bts = await appdGet<BusinessTransaction[]>(
@@ -78,8 +82,7 @@ Returns: BT details plus metric data for each performance metric.`,
             `/controller/rest/applications/${appId}/metric-data`,
             {
               "metric-path": `Business Transaction Performance|Business Transactions|${bt.tierName}|${bt.name}|${metric}`,
-              "time-range-type": "BEFORE_NOW",
-              "duration-in-mins": duration,
+              ...range.params,
             }
           )
             .then((data) => ({ metric, data: data[0] ?? null }))
@@ -95,7 +98,7 @@ Returns: BT details plus metric data for each performance metric.`,
             tierName: bt.tierName,
             entryPointType: bt.entryPointType,
           },
-          timeRange: `Last ${duration} minutes`,
+          timeRange: range.description,
         };
 
         for (const result of metricResults) {

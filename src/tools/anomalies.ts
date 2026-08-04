@@ -9,6 +9,8 @@ import { appdGet } from "../services/api-client.js";
 import { resolveAppId } from "../utils/app-resolver.js";
 import { handleError, textResponse } from "../utils/error-handler.js";
 import { truncateIfNeeded } from "../utils/formatting.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
+import { TimeRangeSchema, resolveTimeRange } from "../utils/time-range.js";
 import {
   DEFAULT_ANOMALY_DURATION_MINS,
   DEFAULT_ANOMALY_SEVERITIES,
@@ -23,14 +25,7 @@ const InputSchema = {
     .describe(
       "Application name or numeric ID. If omitted, checks all applications."
     ),
-  durationInMins: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe(
-      "Time range in minutes to look back. Defaults to 1440 (24 hours)."
-    ),
+  ...TimeRangeSchema,
   severities: z
     .string()
     .optional()
@@ -50,15 +45,14 @@ const InputSchema = {
  */
 async function fetchAnomalies(
   appId: number,
-  duration: number,
+  timeParams: Record<string, string | number>,
   severities: string,
   includeAll: boolean
 ): Promise<AppDEvent[]> {
   const rawEvents = await appdGet<AppDEvent[]>(
     `/controller/rest/applications/${appId}/events`,
     {
-      "time-range-type": "BEFORE_NOW",
-      "duration-in-mins": duration,
+      ...timeParams,
       "event-types": ANOMALY_EVENT_TYPES,
       severities,
     }
@@ -102,9 +96,14 @@ export function registerAnomalyTools(server: McpServer): void {
 
 Set includeAll to true to see all events including closed ones.
 
+Time range: omit all time arguments for the last 24 hours, or specify an exact
+historical window with startTime + endTime (ISO 8601 or epoch ms).
+
 Args:
   - application (string|number, optional): App name or ID. Omit for all apps.
-  - durationInMins (number, optional): Lookback in minutes (default: 1440 = 24h)
+  - durationInMins (number, optional): Window length in minutes (default: 1440 = 24h)
+  - startTime (string|number, optional): Window start — ISO 8601 or epoch ms
+  - endTime (string|number, optional): Window end — ISO 8601 or epoch ms
   - severities (string, optional): Comma-separated severity levels (default: 'INFO,WARN,ERROR')
   - includeAll (boolean, optional): If true, includes all events including closed anomalies
 
@@ -117,40 +116,41 @@ Returns: Array of anomaly events. When querying all apps, results are grouped by
         openWorldHint: true,
       },
     },
-    async ({ application, durationInMins, severities, includeAll }) => {
+    async ({ application, durationInMins, startTime, endTime, severities, includeAll }) => {
       try {
-        const duration = durationInMins ?? DEFAULT_ANOMALY_DURATION_MINS;
+        const range = resolveTimeRange(
+          { durationInMins, startTime, endTime },
+          DEFAULT_ANOMALY_DURATION_MINS
+        );
         const sevs = severities ?? DEFAULT_ANOMALY_SEVERITIES;
         const showAll = includeAll ?? false;
 
         if (application !== undefined) {
           const appId = await resolveAppId(application);
-          const events = await fetchAnomalies(appId, duration, sevs, showAll);
+          const events = await fetchAnomalies(appId, range.params, sevs, showAll);
           return textResponse(truncateIfNeeded(events));
         }
 
-        // All applications
+        // All applications — bounded concurrency to avoid tripping rate limits.
         const apps = await appdGet<AppDApplication[]>(
           "/controller/rest/applications"
         );
 
-        const results = await Promise.all(
-          apps.map(async (app) => {
-            try {
-              const events = await fetchAnomalies(app.id, duration, sevs, showAll);
-              if (events.length > 0) {
-                return {
-                  applicationId: app.id,
-                  applicationName: app.name,
-                  anomalies: events,
-                };
-              }
-            } catch {
-              // Skip apps that fail
+        const results = await mapWithConcurrency(apps, async (app) => {
+          try {
+            const events = await fetchAnomalies(app.id, range.params, sevs, showAll);
+            if (events.length > 0) {
+              return {
+                applicationId: app.id,
+                applicationName: app.name,
+                anomalies: events,
+              };
             }
-            return null;
-          })
-        );
+          } catch {
+            // Skip apps that fail
+          }
+          return null;
+        });
 
         const allAnomalies = results.filter(
           (r): r is NonNullable<typeof r> => r !== null

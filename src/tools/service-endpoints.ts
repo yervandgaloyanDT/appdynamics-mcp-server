@@ -9,6 +9,8 @@ import { appdGet } from "../services/api-client.js";
 import { resolveAppId } from "../utils/app-resolver.js";
 import { handleError, textResponse } from "../utils/error-handler.js";
 import { truncateIfNeeded } from "../utils/formatting.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
+import { TimeRangeSchema, resolveTimeRange } from "../utils/time-range.js";
 import { DEFAULT_DURATION_MINS } from "../constants.js";
 import type { ServiceEndpoint, MetricData } from "../types.js";
 
@@ -27,12 +29,7 @@ const PerfSchema = {
     .union([z.string(), z.number()])
     .describe("Application name or numeric ID."),
   sepId: z.number().int().describe("Service endpoint ID."),
-  durationInMins: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe("Time range in minutes to look back. Defaults to 60."),
+  ...TimeRangeSchema,
 };
 
 export function registerServiceEndpointTools(server: McpServer): void {
@@ -74,25 +71,23 @@ Returns: Array of service endpoints with id, name, tier info, and type.`,
           );
         }
 
-        // Fetch SEPs for all tiers in parallel
-        const results = await Promise.all(
-          filteredTiers.map(async (tier) => {
-            try {
-              const seps = await appdGet<ServiceEndpoint[]>(
-                `/controller/rest/applications/${appId}/tiers/${tier.id}/service-endpoints`
-              );
-              return seps.map((sep) => ({
-                id: sep.id,
-                name: sep.name,
-                tierName: tier.name,
-                tierId: tier.id,
-                type: sep.sepType ?? "unknown",
-              }));
-            } catch {
-              return [];
-            }
-          })
-        );
+        // Fetch SEPs for all tiers, bounded so wide apps don't trip rate limits.
+        const results = await mapWithConcurrency(filteredTiers, async (tier) => {
+          try {
+            const seps = await appdGet<ServiceEndpoint[]>(
+              `/controller/rest/applications/${appId}/tiers/${tier.id}/service-endpoints`
+            );
+            return seps.map((sep) => ({
+              id: sep.id,
+              name: sep.name,
+              tierName: tier.name,
+              tierId: tier.id,
+              type: sep.sepType ?? "unknown",
+            }));
+          } catch {
+            return [];
+          }
+        });
 
         const allSeps = results.flat();
         return textResponse(truncateIfNeeded(allSeps));
@@ -114,10 +109,15 @@ Retrieves average response time, calls per minute, and errors per minute for the
 
 Use appd_get_service_endpoints first to find the SEP ID.
 
+Time range: omit all time arguments for the last hour, or specify an exact
+historical window with startTime + endTime (ISO 8601 or epoch ms).
+
 Args:
   - application (string|number): App name or ID
   - sepId (number): Service endpoint ID
-  - durationInMins (number, optional): Lookback in minutes (default: 60)
+  - durationInMins (number, optional): Window length in minutes (default: 60)
+  - startTime (string|number, optional): Window start — ISO 8601 or epoch ms
+  - endTime (string|number, optional): Window end — ISO 8601 or epoch ms
 
 Returns: Performance metrics for the service endpoint.`,
       inputSchema: PerfSchema,
@@ -128,10 +128,13 @@ Returns: Performance metrics for the service endpoint.`,
         openWorldHint: true,
       },
     },
-    async ({ application, sepId, durationInMins }) => {
+    async ({ application, sepId, durationInMins, startTime, endTime }) => {
       try {
         const appId = await resolveAppId(application);
-        const duration = durationInMins ?? DEFAULT_DURATION_MINS;
+        const range = resolveTimeRange(
+          { durationInMins, startTime, endTime },
+          DEFAULT_DURATION_MINS
+        );
 
         const metrics = [
           "Average Response Time (ms)",
@@ -144,8 +147,7 @@ Returns: Performance metrics for the service endpoint.`,
             `/controller/rest/applications/${appId}/metric-data`,
             {
               "metric-path": `Service Endpoints|${sepId}|${metric}`,
-              "time-range-type": "BEFORE_NOW",
-              "duration-in-mins": duration,
+              ...range.params,
             }
           )
             .then((data) => ({ metric, data: data[0] ?? null }))
@@ -156,7 +158,7 @@ Returns: Performance metrics for the service endpoint.`,
 
         const results: Record<string, unknown> = {
           serviceEndpointId: sepId,
-          timeRange: `Last ${duration} minutes`,
+          timeRange: range.description,
         };
 
         for (const result of metricResults) {

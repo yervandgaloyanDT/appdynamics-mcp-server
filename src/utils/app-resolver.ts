@@ -95,8 +95,9 @@ export async function resolveAppName(appId: number): Promise<string> {
 
   // Fallback: direct per-app endpoint (covers SIM and special application types)
   try {
+    // appdGet already appends output=JSON — do not repeat it in the path.
     const direct = await appdGet<AppDApplication[]>(
-      `/controller/rest/applications/${appId}?output=JSON`
+      `/controller/rest/applications/${appId}`
     );
     if (Array.isArray(direct) && direct[0]?.name) return direct[0].name;
   } catch {

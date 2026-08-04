@@ -18,6 +18,10 @@ export const DEFAULT_METRIC_TREE_MAX_DEPTH = 2;
 // API request timeout in milliseconds
 export const API_TIMEOUT_MS = 30000;
 
+// Maximum simultaneous requests when a tool fans out across applications/tiers.
+// Unbounded parallelism trips controller rate limiting (429) on large accounts.
+export const MAX_CONCURRENT_REQUESTS = 6;
+
 // Token expiry safety margin in seconds (refresh 5 min before actual expiry)
 export const TOKEN_EXPIRY_SAFETY_MARGIN_SECS = 300;
 
@@ -52,18 +56,24 @@ export const ANOMALY_EVENT_TYPES = [
 
 export const DEFAULT_ANOMALY_SEVERITIES = "INFO,WARN,ERROR";
 
-// Dashboard widget types (restui API names)
+// Dashboard widget types (valid restui API enum values — note: the API has no
+// "TEXT" or "METRIC_VALUE"; those MCP-facing aliases map to LABEL/METRIC_LABEL)
 export const WIDGET_TYPES = {
   METRIC_GRAPH: "TIMESERIES_GRAPH",
-  METRIC_VALUE: "METRIC_VALUE",
+  METRIC_VALUE: "METRIC_LABEL",
   HEALTH_STATUS: "HEALTH_LIST",
-  TEXT: "TEXT",
+  TEXT: "LABEL",
   IMAGE: "IMAGE",
   IFRAME: "IFRAME",
   PIE_CHART: "PIE",
   GAUGE: "GAUGE",
   ANALYTICS: "ANALYTICS",
 } as const;
+
+// Alerting v1 health-rules endpoint. The legacy
+// /controller/rest/applications/{id}/health-rules URI returns HTTP 400.
+export const healthRulesApiPath = (appId: number): string =>
+  `/controller/alerting/rest/v1/applications/${appId}/health-rules`;
 
 // ── Phase 2 baseline comparison ─────────────────────────────────────────────
 // Percentage degradation vs prior equivalent window to flag as anomalous.

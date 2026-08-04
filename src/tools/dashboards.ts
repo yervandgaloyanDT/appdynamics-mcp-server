@@ -24,24 +24,24 @@ import { handleError, textResponse } from "../utils/error-handler.js";
 import { truncateIfNeeded } from "../utils/formatting.js";
 import type { BusinessTransaction, Dashboard, DashboardSummary, HealthRule, Tier } from "../types.js";
 import { resolveAppId, resolveAppName } from "../utils/app-resolver.js";
+import { healthRulesApiPath } from "../constants.js";
+import {
+  buildExportWidgetPayload,
+  buildExportDashboardEnvelope,
+  buildWidgetPayload,
+  buildRestuiMetricSeries,
+  patchHealthListWidgets,
+  applyMetricCriteria,
+  type WidgetInput,
+} from "./dashboard-payloads.js";
 
-// ── Color Helpers ─────────────────────────────────────────────────────────────
+// ── Endpoints ─────────────────────────────────────────────────────────────────
 
-/** Convert hex color string (#RRGGBB) to integer, or pass through if already a number. */
-function colorToInt(color: string | number | undefined, fallback: number): number {
-  if (color === undefined) return fallback;
-  if (typeof color === "number") return color;
-  const hex = color.replace(/^#/, "");
-  const parsed = parseInt(hex, 16);
-  return isNaN(parsed) ? fallback : parsed;
-}
+/** RESTUI endpoint returning the full current dashboard (-1 = any version). */
+const dashboardUrl = (id: number): string =>
+  `/controller/restui/dashboards/dashboardIfUpdated/${id}/-1`;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const COLOR_WHITE = 16777215; // #FFFFFF
-const COLOR_LIGHT_GRAY = 15856629; // #F1F1F5
-const COLOR_DARK = 1646891; // #19222B
-const COLOR_BORDER = 14408667; // #DBDBDB
+const UPDATE_DASHBOARD_URL = "/controller/restui/dashboards/updateDashboard";
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -116,6 +116,44 @@ const WidgetSchema = z.object({
       "For HEALTH_LIST widgets: numeric IDs of specific health rules to display. " +
       "Each widget shows only the listed rules. Omit to show all rules for the application. " +
       "Use appd_get_health_rules to look up rule IDs."
+    ),
+  btIds: z
+    .array(z.number().int())
+    .optional()
+    .describe(
+      "For Business Transaction metric widgets: scope to these BT IDs. " +
+      "Use appd_get_business_transactions to look up IDs."
+    ),
+  tierIds: z
+    .array(z.number().int())
+    .optional()
+    .describe(
+      "For application-level metric widgets: scope the metric to these tier IDs " +
+      "(e.g. a per-tier response time graph). Use appd_get_tiers_and_nodes for IDs."
+    ),
+  showPie: z
+    .boolean()
+    .optional()
+    .describe(
+      "For HEALTH_LIST widgets: render the health status as a pie chart instead of " +
+      "the default status bar. Combine with innerRadius for a donut."
+    ),
+  innerRadius: z
+    .number()
+    .int()
+    .min(0)
+    .max(45)
+    .optional()
+    .describe(
+      "For HEALTH_LIST pie widgets: donut hole radius (0 = solid pie, 30-40 = donut). " +
+      "Only meaningful with showPie: true."
+    ),
+  showList: z
+    .boolean()
+    .optional()
+    .describe(
+      "For HEALTH_LIST widgets: show the rule list under the chart. Default true; " +
+      "set false for a chart-only (pie/donut) widget."
     ),
 });
 
@@ -242,7 +280,7 @@ Returns: Complete dashboard object with widgets, layout, and data source configu
     async ({ dashboardId }) => {
       try {
         const dashboard = await appdGetRaw<Dashboard>(
-          `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
+          dashboardUrl(dashboardId)
         );
         return textResponse(truncateIfNeeded(dashboard));
       } catch (error) {
@@ -290,26 +328,7 @@ Returns: The created dashboard object with its new ID.`,
     },
     async ({ name, description, height, width, widgets, template }) => {
       try {
-        // Deduplicate app IDs that need name resolution
-        const idsToResolve = [...new Set(
-          (widgets ?? [])
-            .filter(w => w.applicationId !== undefined && !w.applicationName)
-            .map(w => w.applicationId!)
-        )];
-        const idToName = new Map<number, string>();
-        await Promise.all(
-          idsToResolve.map(async (id) => {
-            idToName.set(id, await resolveAppName(id));
-          })
-        );
-
-        // Apply resolved names to widgets that need it
-        const resolvedWidgets: WidgetInput[] = (widgets ?? []).map(w => {
-          if (w.applicationId !== undefined && !w.applicationName) {
-            return { ...w, applicationName: idToName.get(w.applicationId) ?? String(w.applicationId) };
-          }
-          return w;
-        });
+        const resolvedWidgets = await resolveWidgetAppNames(widgets ?? []);
 
         // Build export-format payload and import via servlet
         const exportWidgets = resolvedWidgets.map((w, i) => buildExportWidgetPayload(w, i));
@@ -323,19 +342,9 @@ Returns: The created dashboard object with its new ID.`,
         // Bind metric criteria and health rule scoping via RESTUI two-step approach.
         if (newId != null) {
           try {
-            await bindMetricWidgets(
-              newId,
-              resolvedWidgets.filter(
-                (w) => w.metricPath !== undefined && w.applicationId !== undefined,
-              ),
-            );
+            await bindDashboardWidgets(newId, resolvedWidgets);
           } catch {
             // Non-fatal: dashboard exists, widgets may show no data
-          }
-          try {
-            await bindHealthListWidgets(newId, resolvedWidgets);
-          } catch {
-            // Non-fatal
           }
         }
 
@@ -378,27 +387,12 @@ Returns: The updated dashboard object.`,
     async ({ dashboardId, name, description, height, width, widgets }) => {
       try {
         const existing = await appdGetRaw<Record<string, unknown>>(
-          `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
+          dashboardUrl(dashboardId)
         );
 
         // Resolve app names for widgets that need them
-        let resolvedWidgets: WidgetInput[] | undefined;
-        if (widgets !== undefined) {
-          const idsToResolve = [...new Set(
-            widgets
-              .filter(w => w.applicationId !== undefined && !w.applicationName)
-              .map(w => w.applicationId!)
-          )];
-          const idToName = new Map<number, string>();
-          await Promise.all(
-            idsToResolve.map(async id => { idToName.set(id, await resolveAppName(id)); })
-          );
-          resolvedWidgets = widgets.map(w =>
-            w.applicationId !== undefined && !w.applicationName
-              ? { ...w, applicationName: idToName.get(w.applicationId) ?? String(w.applicationId) }
-              : w
-          );
-        }
+        const resolvedWidgets =
+          widgets !== undefined ? await resolveWidgetAppNames(widgets) : undefined;
 
         // Step 1: Update dashboard properties + new widgets WITHOUT inline metric criteria.
         // New widgets need server-assigned IDs/GUIDs before criteria can reference them.
@@ -409,8 +403,8 @@ Returns: The updated dashboard object.`,
           ...(height !== undefined && { height }),
           ...(width !== undefined && { width }),
           ...(resolvedWidgets !== undefined && {
-            widgets: resolvedWidgets.map((w, i) => ({
-              ...buildWidgetPayload(w, i),
+            widgets: resolvedWidgets.map((w) => ({
+              ...buildWidgetPayload(w),
               id: 0,
               version: 0,
               guid: randomUUID(),
@@ -420,29 +414,19 @@ Returns: The updated dashboard object.`,
           }),
         };
 
-        await appdPost<Dashboard>("/controller/restui/dashboards/updateDashboard", updated);
+        await appdPost<Dashboard>(UPDATE_DASHBOARD_URL, updated);
 
         // Step 2: Bind metric criteria and health rule scoping using server-assigned widget IDs/GUIDs.
         if (resolvedWidgets !== undefined) {
-          const metricWidgets = resolvedWidgets.filter(
-            w => w.metricPath !== undefined && w.applicationId !== undefined
-          );
-          if (metricWidgets.length > 0) {
-            try {
-              await bindMetricWidgets(dashboardId, metricWidgets);
-            } catch {
-              // Non-fatal: dashboard updated, widgets may show no data
-            }
-          }
           try {
-            await bindHealthListWidgets(dashboardId, resolvedWidgets);
+            await bindDashboardWidgets(dashboardId, resolvedWidgets);
           } catch {
-            // Non-fatal
+            // Non-fatal: dashboard updated, widgets may show no data
           }
         }
 
         const result = await appdGetRaw<Dashboard>(
-          `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
+          dashboardUrl(dashboardId)
         );
         return textResponse(JSON.stringify(result, null, 2));
       } catch (error) {
@@ -483,18 +467,17 @@ Returns: The updated dashboard with the new widget added.`,
     async ({ dashboardId, widget }) => {
       try {
         const existing = await appdGetRaw<Dashboard>(
-          `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
+          dashboardUrl(dashboardId)
         );
 
         const existingWidgets = existing.widgets ?? [];
-        const newWidgetIndex = existingWidgets.length;
 
         // Step 1: Add widget WITHOUT metric criteria.
         // The RESTUI API crashes (500) when adding a new widget (id=0) with metric criteria,
         // because the criteria must reference the server-assigned widgetId and widgetGuid.
         const widgetGuid = randomUUID();
         const basePayload = {
-          ...buildWidgetPayload(widget, newWidgetIndex),
+          ...buildWidgetPayload(widget),
           id: 0,
           version: 0,
           guid: widgetGuid,
@@ -503,35 +486,37 @@ Returns: The updated dashboard with the new widget added.`,
         };
 
         const step1 = await appdPost<Dashboard>(
-          "/controller/restui/dashboards/updateDashboard",
+          UPDATE_DASHBOARD_URL,
           { ...existing, widgets: [...existingWidgets, basePayload] }
         );
 
         // Step 2: If metric widget, bind criteria using the server-assigned id/guid.
-        if (widget.metricPath && widget.applicationId) {
+        if (widget.metricPath && widget.applicationId !== undefined) {
           type W = Record<string, unknown>;
-          const addedWidget = (step1.widgets as W[] | undefined)?.find(
-            (w) => (w["guid"] as string) === widgetGuid || w["title"] === widget.title
-          );
+          const step1Widgets = (step1.widgets as W[] | undefined) ?? [];
+          // Match by our client guid first; fall back to the newly-appended slot,
+          // never by title (a pre-existing widget may share the title).
+          const addedWidget =
+            step1Widgets.find((w) => (w["guid"] as string) === widgetGuid) ??
+            step1Widgets.find(
+              (w) => w["title"] === widget.title && !existingWidgets.some((e) => (e as unknown as W)["id"] === w["id"])
+            );
           if (addedWidget?.["id"] && addedWidget?.["guid"]) {
-            const criteria = buildResuiMetricSeries(
+            const criteria = buildRestuiMetricSeries(
               widget,
               addedWidget["id"] as number,
               addedWidget["guid"] as string,
               dashboardId,
             );
             if (criteria) {
-              const step2Dash = await appdGetRaw<Dashboard>(
-                `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
-              );
-              const step2Widgets = ((step2Dash.widgets as W[]) ?? []).map((w) =>
+              const step2Widgets = step1Widgets.map((w) =>
                 w["id"] === addedWidget["id"]
                   ? { ...w, widgetsMetricMatchCriterias: criteria }
                   : w
               );
               const step2 = await appdPost<Dashboard>(
-                "/controller/restui/dashboards/updateDashboard",
-                { ...step2Dash, widgets: step2Widgets }
+                UPDATE_DASHBOARD_URL,
+                { ...step1, widgets: step2Widgets }
               );
               return textResponse(JSON.stringify(step2, null, 2));
             }
@@ -571,7 +556,7 @@ Returns: The newly created dashboard with its new ID.`,
     async ({ dashboardId, newName }) => {
       try {
         const source = await appdGetRaw<Dashboard>(
-          `/controller/restui/dashboards/dashboardIfUpdated/${dashboardId}/-1`
+          dashboardUrl(dashboardId)
         );
 
         const { id: _id, ...cloneData } = source;
@@ -714,9 +699,9 @@ Returns: The created dashboard name and ID.`,
               )
             : Promise.resolve([] as BusinessTransaction[]),
           needsHealth
-            ? appdGet<HealthRule[]>(
-                `/controller/rest/applications/${appId}/policy/health-rules`
-              ).catch(() => [] as HealthRule[])
+            ? appdGet<HealthRule[]>(healthRulesApiPath(appId)).catch(
+                () => [] as HealthRule[]
+              )
             : Promise.resolve([] as HealthRule[]),
         ]);
 
@@ -864,7 +849,10 @@ Returns: The created dashboard name and ID.`,
             push({
               type: "TIMESERIES_GRAPH",
               title: `${tier.name} - Response Time`,
-              metricPath: `Overall Application Performance|${tier.name}|Average Response Time (ms)`,
+              // Tier scoping happens via tierIds (SPECIFIC_TIERS criteria);
+              // the metric path itself stays app-level.
+              metricPath: "Overall Application Performance|Average Response Time (ms)",
+              tierIds: [tier.id],
               applicationId: appId,
               applicationName: appName,
               width: i === n - 1 ? baseW + extra : baseW,
@@ -889,18 +877,41 @@ Returns: The created dashboard name and ID.`,
           });
           y += 1;
 
-          push({
-            type: "HEALTH_LIST",
-            title: "Health Rules Status",
-            applicationId: appId,
-            applicationName: appName,
-            entityType: "APPLICATION",
-            width: 12,
-            height: 4,
-            x: 0,
-            y,
-          });
-          y += 4;
+          if (healthRules.length > 0) {
+            // One scoped widget per rule → each renders its own green/yellow/red
+            // status circle (the pattern used by working dashboards like 8541).
+            const rules = healthRules.slice(0, 12);
+            const perRow = 4;
+            const w = 12 / perRow;
+            rules.forEach((rule, i) => {
+              push({
+                type: "HEALTH_LIST",
+                title: rule.name,
+                applicationId: appId,
+                applicationName: appName,
+                entityType: "POLICY",
+                healthRuleIds: [rule.id],
+                width: w,
+                height: 2,
+                x: (i % perRow) * w,
+                y: y + Math.floor(i / perRow) * 2,
+              });
+            });
+            y += Math.ceil(rules.length / perRow) * 2;
+          } else {
+            push({
+              type: "HEALTH_LIST",
+              title: "Health Rules Status",
+              applicationId: appId,
+              applicationName: appName,
+              entityType: "POLICY",
+              width: 12,
+              height: 4,
+              x: 0,
+              y,
+            });
+            y += 4;
+          }
         }
 
         // ── Build export-format payload and POST to the import servlet ─────────
@@ -928,19 +939,9 @@ Returns: The created dashboard name and ID.`,
         // We re-fetch and bind BT_AFFECTED_EMC criteria to each metric widget.
         if (newId != null) {
           try {
-            await bindMetricWidgets(
-              newId,
-              widgets.filter(
-                (w) => w.metricPath !== undefined && w.applicationId !== undefined,
-              ),
-            );
+            await bindDashboardWidgets(newId, widgets);
           } catch {
             // Non-fatal: dashboard exists, widgets may show no data
-          }
-          try {
-            await bindHealthListWidgets(newId, widgets);
-          } catch {
-            // Non-fatal
           }
         }
 
@@ -1213,348 +1214,6 @@ Returns: Absolute path of the saved file and a widget summary.`,
   );
 }
 
-// ── Widget Builder ────────────────────────────────────────────────────────────
-
-interface WidgetInput {
-  type: string;
-  title: string;
-  height: number;
-  width: number;
-  x: number;
-  y: number;
-  applicationId?: number;
-  applicationName?: string;
-  metricPath?: string;
-  entityType?: string;
-  text?: string;
-  label?: string;
-  description?: string;
-  adqlQuery?: string;
-  btIds?: number[];
-  healthRuleIds?: number[];
-}
-
-// ── Export Format Builders ────────────────────────────────────────────────────
-// These produce the same JSON structure that AppDynamics generates when you
-// export a dashboard via the UI — suitable for save_dashboard_file and import.
-
-const EXPORT_TYPE_MAP: Record<string, string> = {
-  TIMESERIES_GRAPH: "GraphWidget",
-  METRIC_VALUE: "MetricLabelWidget",
-  HEALTH_LIST: "HealthListWidget",
-  TEXT: "TextWidget",
-  PIE: "PieWidget",
-  GAUGE: "GaugeWidget",
-  ANALYTICS: "AnalyticsWidget",
-  // pass-through if already in export class-name form
-  GraphWidget: "GraphWidget",
-  MetricLabelWidget: "MetricLabelWidget",
-  HealthListWidget: "HealthListWidget",
-  TextWidget: "TextWidget",
-  PieWidget: "PieWidget",
-  GaugeWidget: "GaugeWidget",
-  AnalyticsWidget: "AnalyticsWidget",
-};
-
-/**
- * Build a widget in the AppDynamics export/import JSON format.
- * Matches what AppDynamics produces when you click Export Dashboard in the UI.
- * Key differences from the RESTUI format:
- *   - widgetType uses class names (GaugeWidget, AdvancedGraph, etc.)
- *   - metrics live in dataSeriesTemplates[].metricMatchCriteriaTemplate
- *   - inputMetricPath uses Root||Applications||AppName|| prefix
- *   - backgroundColorsStr is a comma-separated string, backgroundColors is null
- */
-function buildExportWidgetPayload(w: WidgetInput, index: number): Record<string, unknown> {
-  const widgetType = EXPORT_TYPE_MAP[w.type] ?? w.type;
-
-  // Base fields common to all widget types (from real export example)
-  const base: Record<string, unknown> = {
-    widgetType,
-    title: w.title,
-    height: w.height,
-    width: w.width,
-    minHeight: 0,
-    minWidth: 0,
-    x: w.x,
-    y: w.y,
-    label: null,
-    description: w.description ?? null,
-    drillDownUrl: null,
-    openUrlInCurrentTab: false,
-    useMetricBrowserAsDrillDown: widgetType !== "TextWidget" && widgetType !== "AnalyticsWidget",
-    drillDownActionType: null,
-    backgroundColor: COLOR_WHITE,
-    backgroundColors: null,
-    backgroundColorsStr: `${COLOR_WHITE},${COLOR_WHITE}`,
-    color: COLOR_DARK,
-    fontSize: 12,
-    useAutomaticFontSize: false,
-    borderEnabled: false,
-    borderThickness: 0,
-    borderColor: COLOR_BORDER,
-    backgroundAlpha: 1,
-    showValues: false,
-    formatNumber: true,
-    numDecimals: 0,
-    removeZeros: true,
-    compactMode: false,
-    showTimeRange: false,
-    renderIn3D: false,
-    showLegend: null,
-    legendPosition: null,
-    legendColumnCount: null,
-    timeRangeSpecifierType: "UNKNOWN",
-    startTime: null,
-    endTime: null,
-    minutesBeforeAnchorTime: 15,
-    isGlobal: true,
-    propertiesMap: null,
-    dataSeriesTemplates: null,
-  };
-
-  // ── TextWidget ────────────────────────────────────────────────────────────
-  if (widgetType === "TextWidget") {
-    base.useMetricBrowserAsDrillDown = false;
-    base.text = w.text ?? "";
-    return base;
-  }
-
-  // ── AnalyticsWidget ───────────────────────────────────────────────────────
-  if (widgetType === "AnalyticsWidget") {
-    base.useMetricBrowserAsDrillDown = false;
-    base.showValues = false;
-    base.formatNumber = true;
-    base.numDecimals = 2;
-    base.removeZeros = true;
-    base.borderColor = 0;
-    base.color = 3342336;           // AppDynamics analytics blue
-    base.backgroundColorsStr = null;
-    base.adqlQueryList = w.adqlQuery ? [w.adqlQuery] : [];
-    base.analyticsWidgetType = "TABLE";
-    base.searchMode = "ADVANCED";
-    base.isStackingEnabled = false;
-    base.legendsLayout = null;
-    base.maxAllowedYAxisFields = 10;
-    base.maxAllowedXAxisFields = 10;
-    base.min = null;
-    base.interval = null;
-    base.max = null;
-    base.intervalType = null;
-    base.maxType = null;
-    base.minType = null;
-    base.showMinExtremes = false;
-    base.showMaxExtremes = false;
-    base.displayPercentileMarkers = false;
-    base.percentileValue1 = null;
-    base.percentileValue2 = null;
-    base.percentileValue3 = null;
-    base.percentileValue4 = null;
-    base.isShowLogYAxis = false;
-    base.resolution = null;
-    base.dataFetchSize = null;
-    base.percentileLine = null;
-    base.timeRangeInterval = null;
-    base.pollingInterval = null;
-    base.unit = 0;
-    base.isRawQuery = true;
-    base.viewState = null;
-    base.gridState = null;
-    base.slmConfigId = null;
-    base.bjId = null;
-    base.showInverse = false;
-    base.showHealth = false;
-    base.align = "center";
-    base.compareToOption = null;
-    base.trailingPeriod = null;
-    base.trailingPeriodUnit = null;
-    base.isIncreaseGood = null;
-    base.numberFormatOption = null;
-    base.showUnivariateLabel = true;
-    return base;
-  }
-
-  // ── HealthListWidget ──────────────────────────────────────────────────────
-  if (widgetType === "HealthListWidget") {
-    const appName = w.applicationName ?? String(w.applicationId ?? "");
-    // applicationReference scopes the widget to this application
-    base.applicationReference = appName ? {
-      applicationName: appName,
-      entityType: "APPLICATION",
-      entityName: appName,
-      scopingEntityType: null,
-      scopingEntityName: null,
-      subtype: null,
-      uniqueKey: null,
-    } : null;
-    // Scoping mechanism discovered from AppD UI:
-    //   propertiesMap.selectedEntityIds = health rule ID(s) as comma-separated string
-    //   entitySelectionType = null  (NOT "ALL" — null tells AppD to use selectedEntityIds)
-    // Without selectedEntityIds the widget shows all rules for the application.
-    base.entityType = w.entityType ?? "POLICY";
-    base.entitySelectionType = null;
-    base.entityReferences = [];
-    if (w.healthRuleIds?.length) {
-      base.propertiesMap = { selectedEntityIds: w.healthRuleIds.join(",") };
-    } else {
-      base.propertiesMap = null;
-    }
-    base.iconSize = 18;
-    base.iconPosition = "LEFT";
-    base.showSearchBox = false;
-    base.showList = true;
-    base.showListHeader = false;
-    base.showBarPie = true;
-    base.showPie = false;
-    base.showCurrentHealthStatus = false;
-    base.innerRadius = 0;
-    base.aggregationType = "RATIO";
-    return base;
-  }
-
-  // ── Metric-based widgets (GaugeWidget, GraphWidget, MetricLabelWidget, PieWidget) ──
-  if (w.metricPath) {
-    const appName = w.applicationName ?? String(w.applicationId ?? "");
-    // inputMetricPath uses || separators with Root||Applications||AppName|| prefix.
-    const inputMetricPath =
-      `Root||Applications||${appName}||` + w.metricPath.replace(/\|/g, "||");
-
-    // Determine metricType and entityType based on the metric path prefix.
-    // AppDynamics export format only accepts specific metricType enum values.
-    const isBT = w.metricPath.startsWith("Business Transaction Performance");
-    const metricType = isBT ? "BUSINESS_TRANSACTION" : "OVERALL_APPLICATION";
-    const entityType = isBT ? "BUSINESS_TRANSACTION" : "APPLICATION";
-    const evaluationScopeType = isBT ? "TIER_AVERAGE" : null;
-
-    base.dataSeriesTemplates = [
-      {
-        seriesType: "LINE",
-        metricType,
-        showRawMetricName: false,
-        colorPalette: null,
-        name: `Series ${index}`,
-        metricMatchCriteriaTemplate: {
-          entityMatchCriteria: {
-            matchCriteriaType: "SpecificEntities",
-            entityType,
-            agentTypes: null,
-            entityNames: [],
-            summary: false,
-          },
-          metricExpressionTemplate: {
-            metricExpressionType: "Logical",
-            functionType: "VALUE",
-            displayName: null,
-            inputMetricText: false,
-            inputMetricPath,
-            relativeMetricPath: w.metricPath,
-          },
-          rollupMetricData: false,
-          expressionString: "",
-          useActiveBaseline: false,
-          sortResultsAscending: false,
-          maxResults: 20,
-          evaluationScopeType,
-          baselineName: null,
-          applicationName: appName,
-          metricDisplayNameStyle: "DISPLAY_STYLE_AUTO",
-          metricDisplayNameCustomFormat: null,
-          includeHistoricalNodes: null,
-          includeAbove: null,
-          includeBelow: null,
-          includeBoth: null,
-          includeBand12: null,
-          includeBand23: null,
-          includeBand34: null,
-          includeBand45: null,
-          includeShade: null,
-        },
-        axisPosition: null,
-      },
-    ];
-  }
-
-  // Widget-type-specific extra fields
-  if (widgetType === "GaugeWidget") {
-    base.showLabels = true;
-    base.showPercentValues = null;
-    base.useMinMaxValues = true;
-    base.minValue = 0;
-    base.maxValue = 100;
-    base.invertColors = false;
-  }
-
-  if (widgetType === "MetricLabelWidget") {
-    base.label = w.label ?? "${v}";
-    base.text = null;
-    base.textAlign = "RIGHT";
-    base.margin = 15;
-    base.showLabel = false;
-    base.showBaseline = false;
-    base.useBaselineColor = false;
-    base.reverseBaselineColorOrder = false;
-  }
-
-  if (widgetType === "GraphWidget") {
-    base.showValues = false;
-    base.showLegend = true;
-    base.legendPosition = "POSITION_BOTTOM";
-    base.legendColumnCount = 1;
-    base.verticalAxisLabel = null;
-    base.hideHorizontalAxis = null;
-    base.horizontalAxisLabel = null;
-    base.axisType = "LINEAR";
-    base.stackMode = null;
-    base.multipleYAxis = null;
-    base.customVerticalAxisMin = null;
-    base.customVerticalAxisMax = null;
-    base.showEvents = null;
-    base.interpolateDataGaps = false;
-    base.showAllTooltips = null;
-    base.staticThresholdList = [];
-    base.eventFilterTemplate = null;
-  }
-
-  return base;
-}
-
-/**
- * Wrap widget array in the top-level envelope that AppDynamics uses for
- * exported dashboard JSON files. This is the structure you get from
- * "Export Dashboard" in the AppDynamics UI.
- */
-function buildExportDashboardEnvelope(
-  name: string,
-  description: string | null,
-  height: number,
-  width: number,
-  widgetTemplates: Record<string, unknown>[],
-): Record<string, unknown> {
-  return {
-    schemaVersion: null,
-    dashboardFormatVersion: "4.0",
-    name,
-    description,
-    properties: null,
-    templateEntityType: "APPLICATION_COMPONENT_NODE",
-    associatedEntityTemplates: null,
-    timeRangeSpecifierType: "UNKNOWN",
-    minutesBeforeAnchorTime: -1,
-    startDate: null,
-    endDate: null,
-    refreshInterval: 120000,
-    backgroundColor: COLOR_LIGHT_GRAY,
-    color: COLOR_LIGHT_GRAY,
-    height,
-    width,
-    canvasType: "CANVAS_TYPE_GRID",
-    layoutType: "",
-    widgetTemplates,
-    warRoom: false,
-    template: false,
-  };
-}
-
 // ── Import Servlet Helper ─────────────────────────────────────────────────────
 
 /**
@@ -1607,390 +1266,86 @@ async function importViaServlet(
   return found?.id ?? null;
 }
 
-// ── RESTUI Format Builder ─────────────────────────────────────────────────────
+// ── Shared Helpers ────────────────────────────────────────────────────────────
 
 /**
- * Build a widget payload that matches the AppDynamics restui dashboard API format.
- * Reverse-engineered from real dashboard responses.
+ * Fill in applicationName for widgets that only carry an applicationId
+ * (the export format needs the name to embed correct metric paths).
  */
-function buildWidgetPayload(
-  w: WidgetInput,
-  index: number
-): Record<string, unknown> {
-  // Map friendly type aliases to actual API types
-  const typeMap: Record<string, string> = {
-    AdvancedGraph: "TIMESERIES_GRAPH",
-    GraphWidget: "TIMESERIES_GRAPH",
-    MetricValue: "METRIC_VALUE",
-    MetricLabelWidget: "METRIC_VALUE",
-    HealthListWidget: "HEALTH_LIST",
-    TextWidget: "TEXT",
-    PieWidget: "PIE",
-    GaugeWidget: "GAUGE",
-  };
-  const apiType = typeMap[w.type] ?? w.type;
-
-  // Common base properties matching the real API format
-  const base: Record<string, unknown> = {
-    title: w.title,
-    type: apiType,
-    height: w.height,
-    width: w.width,
-    x: w.x,
-    y: w.y,
-    label: w.title,
-    description: w.description ?? null,
-    drillDownUrl: null,
-    openUrlInCurrentTab: false,
-    useMetricBrowserAsDrillDown: true,
-    drillDownActionType: null,
-    backgroundColor: COLOR_WHITE,
-    color: COLOR_DARK,
-    fontSize: 12,
-    useAutomaticFontSize: false,
-    borderEnabled: false,
-    borderThickness: 0,
-    borderColor: COLOR_BORDER,
-    backgroundAlpha: 1.0,
-    showValues: false,
-    formatNumber: true,
-    numDecimals: 0,
-    removeZeros: true,
-    backgroundColors: [COLOR_WHITE, COLOR_WHITE],
-    compactMode: false,
-    showTimeRange: false,
-    renderIn3D: false,
-    isGlobal: true,
-    properties: [],
-    missingEntities: null,
-    minHeight: 0,
-    minWidth: 0,
-    widgetsMetricMatchCriterias: null,
-    timeRangeSpecifierType: "BEFORE_NOW",
-    startTime: null,
-    endTime: null,
-    customTimeRange: null,
-    minutesBeforeAnchorTime: 15,
-  };
-
-  // ── TEXT widget ─────────────────────────────────────────────────────────
-  if (apiType === "TEXT") {
-    base.text = w.text ?? "";
-    base.useMetricBrowserAsDrillDown = false;
-    return base;
-  }
-
-  // ── HEALTH_LIST widget ──────────────────────────────────────────────────
-  if (apiType === "HEALTH_LIST") {
-    base.useMetricBrowserAsDrillDown = false;
-    base.applicationId = w.applicationId ?? null;
-    base.entityType = w.entityType ?? "POLICY";
-    if (w.healthRuleIds?.length) {
-      base.entitySelectionType = "SPECIFIED";
-      base.entityIds = w.healthRuleIds;
-      base.properties = [];
-    } else {
-      base.entitySelectionType = "ALL";
-      base.entityIds = [];
-    }
-    base.iconSize = 20;
-    base.iconPosition = "LEFT";
-    base.showSearchBox = false;
-    base.showList = true;
-    base.showListHeader = false;
-    base.showBarPie = true;
-    base.showPie = false;
-    base.innerRadius = 0;
-    base.aggregationType = "RATIO";
-    base.showCurrentHealthStatus = false;
-    return base;
-  }
-
-  // ── Metric-based widgets: TIMESERIES_GRAPH, METRIC_VALUE, PIE, GAUGE ──
-  if (w.metricPath && w.applicationId) {
-    const pathParts = w.metricPath.split("|");
-    const displayName = pathParts[pathParts.length - 1] ?? w.metricPath;
-
-    base.widgetsMetricMatchCriterias = [
-      {
-        name: `Series ${index + 1}`,
-        nameUnique: true,
-        metricMatchCriteria: {
-          applicationId: w.applicationId,
-          metricExpression: {
-            type: "LEAF_METRIC_EXPRESSION",
-            literalValueExpression: false,
-            literalValue: 0,
-            metricDefinition: {
-              type: "LOGICAL_METRIC",
-              logicalMetricName: null,
-              scope: null,
-              metricId: 0,
-            },
-            functionType: "VALUE",
-            displayName,
-            inputMetricText: true,
-            inputMetricPath: w.metricPath,
-            value: 0,
-          },
-          rollupMetricData: apiType !== "TIMESERIES_GRAPH",
-          expressionString: "",
-          metricDisplayNameStyle: "DISPLAY_STYLE_AUTO",
-          metricDisplayNameCustomFormat: null,
-          metricDataFilter: {
-            sortResultsAscending: false,
-            maxResults: 10,
-          },
-          useActiveBaseline: false,
-          baselineId: 0,
-          includeAbove: false,
-          includeBelow: false,
-          includeBoth: false,
-          includeBand12: false,
-          includeBand23: false,
-          includeBand34: false,
-          includeBand45: false,
-          includeShade: false,
-          isIncludeAllInactiveServers: false,
-          includeHistoricalNodes: false,
-          excludeMaintenanceWindow: false,
-          missingEntities: null,
-        },
-        seriesType: apiType === "PIE" ? "LINE" : "LINE",
-        axisPosition: "LEFT",
-        showRawMetricName: false,
-        metricType: "METRIC_DATA",
-        colorPalette: null,
-      },
-    ];
-
-    // TIMESERIES_GRAPH extras
-    if (apiType === "TIMESERIES_GRAPH") {
-      base.showLegend = true;
-      base.legendPosition = "POSITION_BOTTOM";
-      base.legendColumnCount = 1;
-      base.verticalAxisLabel = null;
-      base.hideHorizontalAxis = null;
-      base.horizontalAxisLabel = null;
-      base.axisType = "LINEAR";
-      base.stackMode = null;
-      base.multipleYAxis = null;
-      base.showEvents = null;
-      base.eventFilter = null;
-      base.interpolateDataGaps = false;
-      base.showAllTooltips = null;
-      base.staticThresholds = null;
-    }
-
-    // PIE extras
-    if (apiType === "PIE") {
-      base.showLabels = true;
-      base.showLegend = true;
-      base.legendPosition = "POSITION_BOTTOM";
-      base.legendColumnCount = 1;
-    }
-
-    return base;
-  }
-
-  // Widget without metric binding
-  if (w.applicationId) {
-    base.applicationId = w.applicationId;
-  }
-
-  return base;
-}
-
-// ── RESTUI Metric Binding Helpers ─────────────────────────────────────────────
-
-/**
- * Build a widgetsMetricMatchCriterias entry for RESTUI updateDashboard.
- * Uses BT_AFFECTED_EMC (the only valid AEMC type accepted by the RESTUI API).
- * type="ALL" for aggregate metrics, type="SPECIFIC" with btIds for per-BT.
- * IMPORTANT: widgetId and widgetGuid must come from the server-assigned values
- * after a widget is saved — not from a client-generated placeholder.
- */
-function buildResuiMetricSeries(
-  w: WidgetInput,
-  widgetId: number,
-  widgetGuid: string,
-  dashboardId: number,
-): unknown[] | null {
-  if (!w.metricPath || !w.applicationId) return null;
-  const segments = w.metricPath.split("|");
-  const logicalMetricName = segments[segments.length - 1] ?? w.metricPath;
-  const hasSpecificBTs = w.btIds && w.btIds.length > 0;
-  // TIMESERIES_GRAPH needs false (returns individual time-series points).
-  // METRIC_VALUE / GAUGE / PIE need true (aggregate to a single display value).
-  const rollupMetricData = w.type !== "TIMESERIES_GRAPH" && w.type !== "GraphWidget";
-  return [
-    {
-      id: 0,
-      version: 0,
-      name: "Series 0",
-      nameUnique: true,
-      widgetGuid,
-      widgetId,
-      dashboardId,
-      seriesType: "LINE",
-      axisPosition: "LEFT",
-      showRawMetricName: false,
-      colorPalette: null,
-      metricType: "BUSINESS_TRANSACTION",
-      metricMatchCriteria: {
-        applicationId: w.applicationId,
-        affectedEntityMatchCriteria: {
-          aemcType: "BT_AFFECTED_EMC",
-          type: hasSpecificBTs ? "SPECIFIC" : "ALL",
-          componentIds: [],
-          componentMatchCriteria: null,
-          missingEntities: null,
-          inverseOnSpecificEntities: false,
-          businessTransactionIds: hasSpecificBTs ? w.btIds! : [],
-          nameMatch: null,
-          btTagInfoMatchCriteria: null,
-        },
-        evaluationScopeType: "TIER_AVERAGE",
-        metricExpression: {
-          type: "LEAF_METRIC_EXPRESSION",
-          literalValueExpression: false,
-          literalValue: 0,
-          metricDefinition: {
-            type: "LOGICAL_METRIC",
-            logicalMetricName,
-            scope: null,
-            metricId: 0,
-          },
-          functionType: "VALUE",
-          displayName: null,
-          inputMetricText: false,
-          inputMetricPath: `Root||` + w.metricPath.replace(/\|/g, "||"),
-          extractedAppIdsFromAnalyticsMetric: null,
-          value: 0,
-        },
-        rollupMetricData,
-        expressionString: "",
-        metricDisplayNameStyle: "DISPLAY_STYLE_AUTO",
-        metricDisplayNameCustomFormat: null,
-        metricDataFilter: { sortResultsAscending: false, maxResults: 20 },
-        useActiveBaseline: false,
-        baselineId: 0,
-        includeAbove: false,
-        includeBelow: false,
-        includeBoth: false,
-        includeBand12: false,
-        includeBand23: false,
-        includeBand34: false,
-        includeBand45: false,
-        includeShade: false,
-        isIncludeAllInactiveServers: false,
-        includeHistoricalNodes: false,
-        excludeMaintenanceWindow: false,
-        missingEntities: null,
-      },
-    },
+async function resolveWidgetAppNames(widgets: WidgetInput[]): Promise<WidgetInput[]> {
+  const idsToResolve = [
+    ...new Set(
+      widgets
+        .filter((w) => w.applicationId !== undefined && !w.applicationName)
+        .map((w) => w.applicationId!)
+    ),
   ];
+  const idToName = new Map<number, string>();
+  await Promise.all(
+    idsToResolve.map(async (id) => {
+      idToName.set(id, await resolveAppName(id));
+    })
+  );
+  return widgets.map((w) =>
+    w.applicationId !== undefined && !w.applicationName
+      ? { ...w, applicationName: idToName.get(w.applicationId) ?? String(w.applicationId) }
+      : w
+  );
 }
 
+// ── Bind Helpers (fetch → pure patch → save) ─────────────────────────────────
+
 /**
- * After importing a dashboard via servlet (which drops all metric bindings),
- * fetch the RESTUI representation (to get server-assigned widget ids/guids),
- * then bind metric criteria to each metric widget via a single updateDashboard call.
- * Non-fatal: swallows errors so the dashboard is still returned to the caller.
+ * After a dashboard is saved (the import servlet drops metric bindings and
+ * HEALTH_LIST scoping), fetch the RESTUI representation to get server-assigned
+ * widget ids/guids, apply BOTH the metric criteria and the health-list scoping
+ * patches to the same widget array, and save once.
  */
-async function bindMetricWidgets(
+async function bindDashboardWidgets(
   dashId: number,
-  metricWidgets: WidgetInput[],
+  sourceWidgets: WidgetInput[],
 ): Promise<void> {
-  const toUpdate = metricWidgets.filter(
+  const metricWidgets = sourceWidgets.filter(
     (w) => w.metricPath !== undefined && w.applicationId !== undefined,
   );
-  if (toUpdate.length === 0) return;
-
-  const widgetByTitle = new Map<string, WidgetInput>();
-  for (const w of toUpdate) widgetByTitle.set(w.title, w);
+  const hasHealthLists = sourceWidgets.some(
+    (w) => w.type === "HEALTH_LIST" || w.type === "HealthListWidget",
+  );
+  if (metricWidgets.length === 0 && !hasHealthLists) return;
 
   const dash = await appdGetRaw<Record<string, unknown>>(
-    `/controller/restui/dashboards/dashboardIfUpdated/${dashId}/-1`,
+    dashboardUrl(dashId),
   );
   const dashWidgets = (dash["widgets"] as Array<Record<string, unknown>>) ?? [];
 
-  let hasChanges = false;
-  const updatedWidgets = dashWidgets.map((w) => {
-    const input = widgetByTitle.get(w["title"] as string);
-    if (!input) return w;
-    const criteria = buildResuiMetricSeries(
-      input,
-      w["id"] as number,
-      w["guid"] as string,
-      dashId,
-    );
-    if (!criteria) return w;
-    hasChanges = true;
-    return { ...w, widgetsMetricMatchCriterias: criteria };
-  });
-
-  if (!hasChanges) return;
-  await appdPost("/controller/restui/dashboards/updateDashboard", {
+  const metricResult = applyMetricCriteria(dashWidgets, metricWidgets, dashId);
+  const healthResult = patchHealthListWidgets(metricResult.widgets, sourceWidgets);
+  if (!metricResult.changed && !healthResult.changed) return;
+  await appdPost(UPDATE_DASHBOARD_URL, {
     ...dash,
-    widgets: updatedWidgets,
+    widgets: healthResult.widgets,
   });
 }
 
 /**
- * After importing via servlet, HEALTH_LIST widgets have properties.selectedEntityIds
- * set correctly but entityIds=[] and entitySelectionType=null, so AppD shows "All".
- * The working format (confirmed from existing dashboards) requires:
- *   entitySelectionType: "SPECIFIED"  (NOT null, NOT "ALL", NOT "SPECIFIC")
- *   entityIds: [ruleId]
- *   properties: []  (selectedEntityIds property not needed when SPECIFIED+entityIds is set)
+ * Import-only variant: fix HEALTH_LIST widgets whose rule ids survived the
+ * servlet (properties.selectedEntityIds or entityIds) so they display rules.
+ * Widgets that carry no recoverable rule ids are left untouched — an imported
+ * dashboard may be scoped in ways we cannot reconstruct.
  */
 async function bindHealthListWidgets(
   dashId: number,
   sourceWidgets?: WidgetInput[],
 ): Promise<void> {
   const dash = await appdGetRaw<Record<string, unknown>>(
-    `/controller/restui/dashboards/dashboardIfUpdated/${dashId}/-1`,
+    dashboardUrl(dashId),
   );
   const dashWidgets = (dash["widgets"] as Array<Record<string, unknown>>) ?? [];
 
-  // Build title → applicationId lookup from source widgets so we can patch
-  // applicationId even when the import servlet couldn't resolve the app name.
-  const appIdByTitle = new Map<string, number>();
-  for (const w of sourceWidgets ?? []) {
-    if (w.type === "HEALTH_LIST" && w.applicationId != null) {
-      appIdByTitle.set(w.title, w.applicationId);
-    }
-  }
-
-  let hasChanges = false;
-  const updatedWidgets = dashWidgets.map((w) => {
-    if (w["type"] !== "HEALTH_LIST") return w;
-    // Get rule ID from properties.selectedEntityIds (set by import servlet)
-    const props = (w["properties"] as Array<Record<string, unknown>>) ?? [];
-    const prop = props.find((p) => p["name"] === "selectedEntityIds");
-    if (!prop) return w;
-    const ruleId = parseInt(String(prop["value"]), 10);
-    if (isNaN(ruleId)) return w;
-    hasChanges = true;
-    const patch: Record<string, unknown> = {
-      entitySelectionType: "SPECIFIED",
-      entityIds: [ruleId],
-      properties: [],  // Clear selectedEntityIds — SPECIFIED+entityIds is canonical
-    };
-    // Patch applicationId when import servlet couldn't resolve the app name
-    const srcAppId = appIdByTitle.get(w["title"] as string);
-    if (srcAppId != null && (!w["applicationId"] || w["applicationId"] === 0)) {
-      patch["applicationId"] = srcAppId;
-    }
-    return { ...w, ...patch };
-  });
-
-  if (!hasChanges) return;
-  await appdPost("/controller/restui/dashboards/updateDashboard", {
+  const { widgets, changed } = patchHealthListWidgets(dashWidgets, sourceWidgets);
+  if (!changed) return;
+  await appdPost(UPDATE_DASHBOARD_URL, {
     ...dash,
-    widgets: updatedWidgets,
+    widgets,
   });
 }
-
-

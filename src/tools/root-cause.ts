@@ -11,6 +11,12 @@ import { resolveAppId } from "../utils/app-resolver.js";
 import { handleError, textResponse, isAxios404 } from "../utils/error-handler.js";
 import { truncateIfNeeded, formatTimestamp } from "../utils/formatting.js";
 import {
+  TimeRangeSchema,
+  resolveTimeRange,
+  precedingWindow,
+} from "../utils/time-range.js";
+import {
+  DEFAULT_DURATION_MINS,
   DIAG_ERROR_EVENT_TYPES,
   DIAG_ANOMALY_EVENT_TYPES,
   DIAG_EVENT_SEVERITIES,
@@ -167,21 +173,17 @@ function extractMetricAverage(data: unknown): number | null {
 }
 
 /**
- * Fetches a single metric. When endTimeMs is provided uses BEFORE_TIME (for
- * the baseline window), otherwise BEFORE_NOW (current window).
+ * Fetches a single metric over the supplied time-range parameters.
  * 404s are silently ignored (metric not instrumented).
  */
 async function fetchMetricSafe(
   appId: number,
   metricPath: string,
-  duration: number,
+  timeParams: Record<string, string | number>,
   warnings: string[],
-  endTimeMs?: number,
 ): Promise<number | null> {
   try {
-    const params = endTimeMs
-      ? { "metric-path": metricPath, "time-range-type": "BEFORE_TIME", "duration-in-mins": duration, "end-time": endTimeMs }
-      : { "metric-path": metricPath, "time-range-type": "BEFORE_NOW",  "duration-in-mins": duration };
+    const params = { "metric-path": metricPath, ...timeParams };
     const data = await appdGet(`/controller/rest/applications/${appId}/metric-data`, params);
     return extractMetricAverage(data);
   } catch (err) {
@@ -227,12 +229,7 @@ const InputSchema = {
   application: z
     .union([z.string(), z.number()])
     .describe("Application name or numeric ID."),
-  durationInMins: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe("Time window to analyse in minutes. Defaults to 60."),
+  ...TimeRangeSchema,
   focus: z
     .enum(["all", "performance", "errors", "availability"])
     .optional()
@@ -260,9 +257,16 @@ Phase 2 (metrics with baseline): For each affected tier, backend, and node, fetc
 
 Use this when you need to quickly understand *why* an application is behaving badly without manually calling many separate tools.
 
+Time range: omit all time arguments to analyse the last hour. To investigate a
+past incident, pass startTime + endTime (ISO 8601 or epoch ms) — the baseline
+window automatically becomes the equivalent window immediately before it, so
+degradation is measured against normal behaviour leading into the incident.
+
 Args:
   - application (string|number): App name or numeric ID
-  - durationInMins (number, optional): Lookback window in minutes (default: 60)
+  - durationInMins (number, optional): Window length in minutes (default: 60)
+  - startTime (string|number, optional): Window start — ISO 8601 or epoch ms
+  - endTime (string|number, optional): Window end — ISO 8601 or epoch ms
   - focus (string, optional): Narrow diagnosis to 'performance', 'errors', 'availability', or 'all' (default)
 
 Returns: A structured diagnostic report with summary, causalityChain (ordered root→effect), tierMetrics, backendAnalysis, infrastructureInsights (all with baseline comparison), ranked root cause candidates, timeline, error breakdown, sample snapshots (with sqlQueries/httpCalls/errorStackTrace), and metric-aware investigation steps.`,
@@ -274,16 +278,16 @@ Returns: A structured diagnostic report with summary, causalityChain (ordered ro
         openWorldHint: true,
       },
     },
-    async ({ application, durationInMins, focus }) => {
+    async ({ application, durationInMins, startTime, endTime, focus }) => {
       try {
         const appId = await resolveAppId(application);
-        const duration = durationInMins ?? 60;
+        const range = resolveTimeRange(
+          { durationInMins, startTime, endTime },
+          DEFAULT_DURATION_MINS
+        );
         const focusMode = focus ?? "all";
 
-        const timeParams = {
-          "time-range-type": "BEFORE_NOW",
-          "duration-in-mins": duration,
-        };
+        const timeParams = range.params;
 
         // ── Parallel Fetches ───────────────────────────────────────────────
 
@@ -574,8 +578,8 @@ Returns: A structured diagnostic report with summary, causalityChain (ordered ro
 
         const phase2Warnings: string[] = [];
 
-        // Baseline window ends where the current window starts
-        const baselineEndTimeMs = Date.now() - duration * 60 * 1000;
+        // Baseline window: the equivalent window immediately before this one.
+        const baselineRange = precedingWindow(range);
 
         // Select tiers: affected first, fill from all tiers, cap
         const tiersToQuery = [
@@ -609,9 +613,9 @@ Returns: A structured diagnostic report with summary, causalityChain (ordered ro
           keyPrefix: string,
         ): [Promise<P2Entry>, Promise<P2Entry>] {
           return [
-            fetchMetricSafe(appId, metricPath, duration, phase2Warnings)
+            fetchMetricSafe(appId, metricPath, range.params, phase2Warnings)
               .then(v => ({ key: `${keyPrefix}:cur`, value: v })),
-            fetchMetricSafe(appId, metricPath, duration, phase2Warnings, baselineEndTimeMs)
+            fetchMetricSafe(appId, metricPath, baselineRange.params, phase2Warnings)
               .then(v => ({ key: `${keyPrefix}:base`, value: v })),
           ];
         }
@@ -837,7 +841,7 @@ Returns: A structured diagnostic report with summary, causalityChain (ordered ro
           totalAnomalies === 0 &&
           totalErrors === 0
         ) {
-          summary = `No health violations, anomalies, or error events found in the last ${duration} minutes. The application appears healthy.`;
+          summary = `No health violations, anomalies, or error events found in the analysis window (${range.description}). The application appears healthy.`;
         } else {
           const parts: string[] = [];
           if (totalViolations > 0)
@@ -853,7 +857,7 @@ Returns: A structured diagnostic report with summary, causalityChain (ordered ro
             parts.push(
               `${totalErrors} error/infrastructure event${totalErrors !== 1 ? "s" : ""}`
             );
-          summary = `Found ${parts.join(", ")} in the last ${duration} minutes.`;
+          summary = `Found ${parts.join(", ")} in the analysis window (${range.description}).`;
         }
 
         // ── Causality chain ────────────────────────────────────────────────
@@ -952,7 +956,8 @@ Returns: A structured diagnostic report with summary, causalityChain (ordered ro
         // ── Assemble report ────────────────────────────────────────────────
         const report = {
           summary,
-          timeWindow: `Last ${duration} minutes`,
+          timeWindow: range.description,
+          baselineWindow: baselineRange.description,
           ...(issueStartedAround ? { issueStartedAround } : {}),
           ...(dataFetchWarnings.length > 0 ? { dataFetchWarnings } : {}),
           topRootCauseCandidates: ranked,

@@ -9,6 +9,8 @@ import { appdGet } from "../services/api-client.js";
 import { resolveAppId } from "../utils/app-resolver.js";
 import { handleError, textResponse, isAxios404 } from "../utils/error-handler.js";
 import { truncateIfNeeded } from "../utils/formatting.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
+import { TimeRangeSchema, resolveTimeRange } from "../utils/time-range.js";
 import { DEFAULT_VIOLATIONS_DURATION_MINS } from "../constants.js";
 import type { AppDApplication, HealthRuleViolation } from "../types.js";
 
@@ -19,14 +21,7 @@ const InputSchema = {
     .describe(
       "Application name or numeric ID. If omitted, checks all applications."
     ),
-  durationInMins: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe(
-      "Time range in minutes to look back. Defaults to 1440 (24 hours)."
-    ),
+  ...TimeRangeSchema,
 };
 
 /**
@@ -34,13 +29,8 @@ const InputSchema = {
  */
 async function fetchViolations(
   appId: number,
-  duration: number
+  params: Record<string, string | number>
 ): Promise<HealthRuleViolation[]> {
-  const params = {
-    "time-range-type": "BEFORE_NOW",
-    "duration-in-mins": duration,
-  };
-
   let data: unknown;
   try {
     data = await appdGet(
@@ -98,9 +88,14 @@ export function registerHealthViolationTools(server: McpServer): void {
 If application is not provided, returns violations across all monitored applications.
 Supports application lookup by name or numeric ID.
 
+Time range: omit all time arguments for the last 24 hours, or specify an exact
+historical window with startTime + endTime (ISO 8601 or epoch ms).
+
 Args:
   - application (string|number, optional): App name or ID. Omit for all apps.
-  - durationInMins (number, optional): Lookback window in minutes (default: 1440 = 24h)
+  - durationInMins (number, optional): Window length in minutes (default: 1440 = 24h)
+  - startTime (string|number, optional): Window start — ISO 8601 or epoch ms
+  - endTime (string|number, optional): Window end — ISO 8601 or epoch ms
 
 Returns: Array of health rule violations with severity, status, affected entity, and timestamps.`,
       inputSchema: InputSchema,
@@ -111,44 +106,44 @@ Returns: Array of health rule violations with severity, status, affected entity,
         openWorldHint: true,
       },
     },
-    async ({ application, durationInMins }) => {
+    async ({ application, durationInMins, startTime, endTime }) => {
       try {
-        const duration =
-          durationInMins ?? DEFAULT_VIOLATIONS_DURATION_MINS;
+        const range = resolveTimeRange(
+          { durationInMins, startTime, endTime },
+          DEFAULT_VIOLATIONS_DURATION_MINS
+        );
 
         if (application !== undefined) {
           const appId = await resolveAppId(application);
-          const violations = await fetchViolations(appId, duration);
+          const violations = await fetchViolations(appId, range.params);
           return textResponse(truncateIfNeeded(violations));
         }
 
-        // All applications
+        // All applications — bounded concurrency to avoid tripping rate limits.
         const apps = await appdGet<AppDApplication[]>(
           "/controller/rest/applications"
         );
 
-        const results = await Promise.all(
-          apps.map(async (app) => {
-            try {
-              const violations = await fetchViolations(app.id, duration);
-              if (violations.length > 0) {
-                return {
-                  applicationId: app.id,
-                  applicationName: app.name,
-                  violations,
-                };
-              }
-            } catch (error) {
-              if (!isAxios404(error)) {
-                console.error(
-                  `Error fetching violations for app ID ${app.id}:`,
-                  error instanceof Error ? error.message : "unknown error"
-                );
-              }
+        const results = await mapWithConcurrency(apps, async (app) => {
+          try {
+            const violations = await fetchViolations(app.id, range.params);
+            if (violations.length > 0) {
+              return {
+                applicationId: app.id,
+                applicationName: app.name,
+                violations,
+              };
             }
-            return null;
-          })
-        );
+          } catch (error) {
+            if (!isAxios404(error)) {
+              console.error(
+                `Error fetching violations for app ID ${app.id}:`,
+                error instanceof Error ? error.message : "unknown error"
+              );
+            }
+          }
+          return null;
+        });
 
         const allViolations = results.filter(
           (r): r is NonNullable<typeof r> => r !== null
