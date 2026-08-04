@@ -48,7 +48,11 @@
       "Bash(claude mcp *)",
       "Bash(git log *)",
       "Bash(git checkout *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "mcp__atlassian__getAccessibleAtlassianResources",
+      "mcp__atlassian__getVisibleJiraProjects",
+      "mcp__atlassian__searchJiraIssuesUsingJql"
     ]
   }
 }
