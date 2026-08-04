@@ -5,3 +5,6 @@ dist/
 .env.local
 .vscode/
 exports/
+
+# Machine-local Claude Code settings — has held credentials in permission rules
+.claude/settings.local.json
