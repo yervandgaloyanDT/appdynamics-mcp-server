@@ -74,22 +74,29 @@ export function handleError(error: unknown): ToolResponse {
       const status = error.response.status;
       const dataStr = summarizeErrorBody(error.response.data);
 
+      // The controller's own message is kept on every branch: it routinely
+      // names the entity that was rejected ("Invalid application id x is
+      // specified"), which the generic guidance alone would throw away.
       switch (status) {
         case 401:
           return errorResponse(
-            `Authentication failed (401). Check APPD_CLIENT_NAME, APPD_CLIENT_SECRET, and APPD_ACCOUNT_NAME.`
+            `Authentication failed (401). Check APPD_CLIENT_NAME, APPD_CLIENT_SECRET, and APPD_ACCOUNT_NAME.`,
+            dataStr
           );
         case 403:
           return errorResponse(
-            `Permission denied (403). The API client may not have access to this resource.`
+            `Permission denied (403). The API client may not have access to this resource.`,
+            dataStr
           );
         case 404:
           return errorResponse(
-            `Resource not found (404). Verify the application ID or resource ID is correct.`
+            `Resource not found (404). Verify the application ID or resource ID is correct.`,
+            dataStr
           );
         case 429:
           return errorResponse(
-            `Rate limit exceeded (429). Wait a moment before retrying.`
+            `Rate limit exceeded (429). Wait a moment before retrying.`,
+            dataStr
           );
         default:
           return errorResponse(`API error ${status}: ${dataStr}`);
@@ -116,9 +123,20 @@ export function handleError(error: unknown): ToolResponse {
   return errorResponse(`Error: ${message}`);
 }
 
-function errorResponse(text: string): ToolResponse {
+/**
+ * Build an error response, appending the upstream detail when there is one
+ * worth showing (an empty or absent body adds nothing but noise).
+ */
+function errorResponse(text: string, detail?: string): ToolResponse {
+  const hasDetail =
+    detail !== undefined &&
+    detail.length > 0 &&
+    detail !== "(no response body)";
+
   return {
-    content: [{ type: "text" as const, text }],
+    content: [
+      { type: "text" as const, text: hasDetail ? `${text}\nController said: ${detail}` : text },
+    ],
     isError: true,
   };
 }
@@ -130,11 +148,4 @@ export function textResponse(text: string): ToolResponse {
   return {
     content: [{ type: "text" as const, text }],
   };
-}
-
-/**
- * Create a successful JSON response from any data.
- */
-export function jsonResponse(data: unknown): ToolResponse {
-  return textResponse(JSON.stringify(data, null, 2));
 }

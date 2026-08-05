@@ -35,6 +35,35 @@ describe("handleError", () => {
     expect(textOf(handleError(axiosError(429, "")))).toMatch(/Rate limit/);
   });
 
+  it("keeps the controller's own message alongside the guidance", () => {
+    // A 404/400 body normally names the entity that was rejected; dropping it
+    // left the caller with generic advice and no idea what was wrong.
+    const text = textOf(
+      handleError(axiosError(404, "Invalid application id no-such-app is specified"))
+    );
+    expect(text).toMatch(/not found/);
+    expect(text).toContain("Invalid application id no-such-app is specified");
+  });
+
+  it("attaches upstream detail on every known status", () => {
+    for (const status of [401, 403, 404, 429]) {
+      expect(textOf(handleError(axiosError(status, "detail here")))).toContain(
+        "detail here"
+      );
+    }
+  });
+
+  it("omits the detail line when the body is empty", () => {
+    for (const status of [401, 403, 404, 429]) {
+      expect(textOf(handleError(axiosError(status, "")))).not.toContain(
+        "Controller said:"
+      );
+      expect(textOf(handleError(axiosError(status, undefined)))).not.toContain(
+        "Controller said:"
+      );
+    }
+  });
+
   it("caps an oversized HTML error body", () => {
     const htmlPage = `<html><body>${"<div>noise</div>".repeat(5000)}</body></html>`;
     const text = textOf(handleError(axiosError(500, htmlPage)));

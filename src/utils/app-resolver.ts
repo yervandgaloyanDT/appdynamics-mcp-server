@@ -12,20 +12,57 @@ let cachedApps: AppDApplication[] | null = null;
 let cacheTimestamp = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Shared in-flight fetch, so concurrent tools issue one request, not N. */
+let inFlight: Promise<AppDApplication[]> | null = null;
+
 /**
  * Fetch and cache the list of all applications.
+ *
+ * Tools frequently resolve an application name at the same moment (a fan-out
+ * across apps, or several tool calls in one turn). Without the in-flight share
+ * each of those would fire its own /rest/applications request on a cold cache.
  */
 async function getApplicationsList(): Promise<AppDApplication[]> {
   if (cachedApps && Date.now() - cacheTimestamp < CACHE_TTL_MS) {
     return cachedApps;
   }
+  if (inFlight) return inFlight;
 
-  const apps = await appdGet<AppDApplication[]>(
-    "/controller/rest/applications"
-  );
-  cachedApps = apps;
-  cacheTimestamp = Date.now();
-  return apps;
+  inFlight = (async () => {
+    try {
+      const apps = await appdGet<AppDApplication[]>(
+        "/controller/rest/applications"
+      );
+      cachedApps = apps;
+      cacheTimestamp = Date.now();
+      return apps;
+    } finally {
+      inFlight = null;
+    }
+  })();
+
+  return inFlight;
+}
+
+/**
+ * Look an application up directly by name or id.
+ *
+ * `/rest/applications/{nameOrId}` resolves both forms and — unlike the list
+ * endpoint — covers applications that never appear in /rest/applications
+ * (SIM and other special application types). A miss returns HTTP 400, not 404.
+ */
+async function lookupApplicationDirect(
+  nameOrId: string | number
+): Promise<AppDApplication | null> {
+  try {
+    const result = await appdGet<AppDApplication[]>(
+      `/controller/rest/applications/${encodeURIComponent(String(nameOrId))}`
+    );
+    const found = Array.isArray(result) ? result[0] : undefined;
+    return found?.id !== undefined ? found : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -77,6 +114,11 @@ export async function resolveAppId(
     );
   }
 
+  // Not in the list — it may still exist. SIM and other special application
+  // types are absent from /rest/applications but resolve by name directly.
+  const direct = await lookupApplicationDirect(appIdentifier);
+  if (direct) return direct.id;
+
   throw new Error(
     `No application found matching "${appIdentifier}". Use the appd_get_applications tool to see all available applications.`
   );
@@ -94,22 +136,8 @@ export async function resolveAppName(appId: number): Promise<string> {
   if (found) return found.name;
 
   // Fallback: direct per-app endpoint (covers SIM and special application types)
-  try {
-    // appdGet already appends output=JSON — do not repeat it in the path.
-    const direct = await appdGet<AppDApplication[]>(
-      `/controller/rest/applications/${appId}`
-    );
-    if (Array.isArray(direct) && direct[0]?.name) return direct[0].name;
-  } catch {
-    // ignore — return numeric fallback below
-  }
-  return String(appId);
-}
+  const direct = await lookupApplicationDirect(appId);
+  if (direct?.name) return direct.name;
 
-/**
- * Invalidate the cached applications list.
- */
-export function clearAppCache(): void {
-  cachedApps = null;
-  cacheTimestamp = 0;
+  return String(appId);
 }
