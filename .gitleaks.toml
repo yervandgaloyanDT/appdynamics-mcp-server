@@ -1,0 +1,35 @@
+# gitleaks configuration
+#
+# Added after an APPD_CLIENT_SECRET reached public history through a Claude Code
+# permission rule and 16 probe scripts. The scan runs over full history in CI, so
+# a credential reintroduced in any commit fails the build.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "appdynamics-client-secret"
+description = "AppDynamics OAuth client secret assigned inline"
+# The leak looked like APPD_CLIENT_SECRET=<uuid> on a command line and as
+# `const SECRET = "<uuid>"` in scripts. Env-var *references* stay legal.
+regex = '''(?i)(appd_client_secret|client_secret)\s*[:=]\s*["']?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}["']?'''
+tags = ["appdynamics", "credential"]
+
+[allowlist]
+description = "Known-safe matches"
+
+paths = [
+  # Dashboard/widget GUIDs captured from the controller — identifiers, not secrets.
+  '''test/fixtures/.*\.json''',
+  # package-lock integrity hashes.
+  '''package-lock\.json''',
+]
+
+regexes = [
+  # Placeholder left by the history rewrite that purged the real secret.
+  '''REDACTED-ROTATED-SECRET''',
+  # Documented env-var usage, e.g. process.env.APPD_CLIENT_SECRET.
+  '''(process\.env\.|\$\{?)APPD_CLIENT_SECRET''',
+  # .env.example placeholders.
+  '''APPD_CLIENT_SECRET=(your-|<|$)''',
+]

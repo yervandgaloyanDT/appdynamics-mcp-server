@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Fails on any type error; the build itself is just tsc.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      # Catches a broken entry point that typechecks but cannot start —
+      # the server must come up on stdio without a controller to talk to.
+      - name: Server starts
+        run: npm run build && node -e "
+          const { spawn } = require('child_process');
+          const p = spawn(process.execPath, ['dist/index.js'], { stdio: ['pipe','pipe','pipe'] });
+          let err = '';
+          p.stderr.on('data', d => { err += d; if (err.includes('running via stdio')) { p.kill(); process.exit(0); } });
+          p.on('exit', c => { console.error('exited early:', c, err); process.exit(1); });
+          setTimeout(() => { console.error('no startup banner:', err); p.kill(); process.exit(1); }, 20000);
+          "
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a credential added in an older commit must still fail
+          # the build even when the tip is clean.
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
