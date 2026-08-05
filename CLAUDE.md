@@ -40,6 +40,7 @@ src/
     ├── business-transactions.ts # appd_get_business_transactions
     ├── bt-performance.ts      # appd_get_bt_performance
     ├── service-endpoints.ts   # appd_get_service_endpoints, appd_get_service_endpoint_performance
+    ├── service-endpoint-paths.ts # Pure SEP metric-tree path builders + matching (no I/O)
     ├── tiers-nodes.ts         # appd_get_tiers_and_nodes
     ├── backends.ts            # appd_get_backends
     ├── snapshots.ts           # appd_get_snapshots
@@ -50,18 +51,26 @@ src/
     │                          # appd_clone_dashboard, appd_delete_dashboard, appd_export_dashboard,
     │                          # appd_auto_build_dashboard
     ├── dashboard-payloads.ts  # Pure widget/dashboard payload builders (no I/O, unit-tested)
-    └── root-cause.ts          # appd_diagnose_issue
+    ├── root-cause.ts          # appd_diagnose_issue — fetching + assembly only
+    └── root-cause-analysis.ts # Pure correlation/scoring/narration (no I/O, unit-tested)
 
 test/
 ├── dashboard-payloads.test.ts # Vitest unit tests for the payload builders
+├── root-cause-analysis.test.ts # Correlation, scoring, ranking, timeline, narration
+├── service-endpoint-paths.test.ts # SEP metric-path shape and name matching
+├── app-resolver.test.ts       # Name/ID resolution, direct fallback, cache + in-flight share
 ├── time-range.test.ts         # Range-type selection, timestamp parsing, validation
 ├── formatting.test.ts         # Response truncation stays within CHARACTER_LIMIT
 ├── auth.test.ts               # Token caching, in-flight dedupe, invalidation
 ├── concurrency.test.ts        # Order preservation and concurrency ceiling
-├── error-handler.test.ts      # Status mapping and error-body capping
+├── error-handler.test.ts      # Status mapping, error-body capping, upstream detail
 └── fixtures/                  # RESTUI + export JSON captured from real working dashboards
-                                # (ground truth for widget/metric criteria shapes)
+                                # (ground truth for widget/metric criteria shapes), plus
+                                # metric-tree-service-endpoints.json
 ```
+
+CI (`.github/workflows/ci.yml`) runs typecheck, the unit tests, and a server-startup smoke
+check on every push and PR, plus a gitleaks scan over full history (config: `.gitleaks.toml`).
 
 ### Key Design Decisions
 
@@ -196,9 +205,50 @@ These are load-bearing: getting any of them wrong makes widgets save "successful
 - Health rules come from `/controller/alerting/rest/v1/applications/{id}/health-rules`
   (the legacy `/rest/applications/{id}/health-rules` returns 400).
 
+### Service endpoints
+
+SEPs have **no usable configuration endpoint** on SaaS controllers — all of these return
+`400 Unsupported URI` or `404`:
+
+```
+GET  /rest/applications/{app}/service-endpoints
+GET  /rest/applications/{app}/tiers/{tier}/service-endpoints
+POST /restui/serviceEndpoint/*
+```
+
+Both SEP tools therefore work through the metric tree, which is laid out **tier-first**:
+
+```
+Service Endpoints|<tier>|<endpoint>|<metric>     ← resolves, returns data
+Service Endpoints|<numeric id>|<metric>          ← always empty (the old, broken shape)
+Service Endpoints|<endpoint>|<metric>            ← always empty (tier segment is required)
+```
+
+Consequences, both documented in the tool descriptions: only endpoints that have *reported
+metrics* are listed, and `appd_get_service_endpoint_performance` takes an endpoint **name**
+(plus optional `tier` to disambiguate), never an id. Path builders and name matching live in
+`service-endpoint-paths.ts` (pure); a name containing `|` is rejected rather than silently
+producing a path that resolves to nothing.
+
+### Application resolution
+
+`resolveAppId` searches `/rest/applications` first, then falls back to
+`/rest/applications/{nameOrId}`, which resolves by name **or** id and covers SIM and other
+special application types absent from the list endpoint. A miss there returns HTTP 400, not
+404. The list fetch is cached for 5 minutes and shares one in-flight request across
+concurrent callers.
+
+### Failure reporting
+
+Tools must not return an empty-but-successful result when a request failed — that is
+indistinguishable from "nothing to report" and hid the broken SEP tools for months. Collect
+failures into a `warnings` array on the response (see `listServiceEndpoints` and
+`root-cause.ts`'s `dataFetchWarnings`). `handleError` likewise appends the controller's own
+message ("Controller said: …") to the generic guidance for every status.
+
 ## Testing
 
-- `npm test` — vitest unit tests for the payload builders against `test/fixtures/` ground truth
+- `npm test` — vitest unit tests over the pure modules, against `test/fixtures/` ground truth
 - `node scripts/verify-dashboard-fixes.mjs` — end-to-end: drives the real MCP server over stdio,
   creates dashboards on the live controller, asserts persisted RESTUI shapes and metric data.
   Requires `APPD_URL`, `APPD_CLIENT_NAME`, `APPD_CLIENT_SECRET`, `APPD_ACCOUNT_NAME` env vars.

@@ -13,8 +13,6 @@ export const DEFAULT_ANOMALY_DURATION_MINS = 1440; // 24 hours
 
 // Default result limits
 export const DEFAULT_MAX_SNAPSHOTS = 20;
-export const DEFAULT_METRIC_TREE_MAX_DEPTH = 2;
-
 // API request timeout in milliseconds
 export const API_TIMEOUT_MS = 30000;
 
@@ -55,20 +53,6 @@ export const ANOMALY_EVENT_TYPES = [
 ].join(",");
 
 export const DEFAULT_ANOMALY_SEVERITIES = "INFO,WARN,ERROR";
-
-// Dashboard widget types (valid restui API enum values — note: the API has no
-// "TEXT" or "METRIC_VALUE"; those MCP-facing aliases map to LABEL/METRIC_LABEL)
-export const WIDGET_TYPES = {
-  METRIC_GRAPH: "TIMESERIES_GRAPH",
-  METRIC_VALUE: "METRIC_LABEL",
-  HEALTH_STATUS: "HEALTH_LIST",
-  TEXT: "LABEL",
-  IMAGE: "IMAGE",
-  IFRAME: "IFRAME",
-  PIE_CHART: "PIE",
-  GAUGE: "GAUGE",
-  ANALYTICS: "ANALYTICS",
-} as const;
 
 // Alerting v1 health-rules endpoint. The legacy
 // /controller/rest/applications/{id}/health-rules URI returns HTTP 400.

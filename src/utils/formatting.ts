@@ -76,28 +76,3 @@ function largestFittingPrefix(items: readonly unknown[]): number {
 export function formatTimestamp(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
-
-/**
- * Format a duration in milliseconds to human-readable form.
- */
-export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  if (ms < 3600000) return `${(ms / 60000).toFixed(1)}m`;
-  return `${(ms / 3600000).toFixed(1)}h`;
-}
-
-/**
- * Build a Markdown summary table from key-value pairs.
- */
-export function markdownTable(
-  headers: string[],
-  rows: string[][]
-): string {
-  const header = `| ${headers.join(" | ")} |`;
-  const separator = `| ${headers.map(() => "---").join(" | ")} |`;
-  const body = rows
-    .map((row) => `| ${row.join(" | ")} |`)
-    .join("\n");
-  return `${header}\n${separator}\n${body}`;
-}

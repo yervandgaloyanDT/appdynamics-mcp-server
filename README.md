@@ -154,8 +154,8 @@ Required variables:
 |---|---|
 | `appd_get_business_transactions` | List BTs for an application |
 | `appd_get_bt_performance` | Get response time, throughput, errors for a BT |
-| `appd_get_service_endpoints` | List service endpoints (API-level granularity) |
-| `appd_get_service_endpoint_performance` | Get performance metrics for a service endpoint |
+| `appd_get_service_endpoints` | List service endpoints (API-level granularity), discovered via the metric tree |
+| `appd_get_service_endpoint_performance` | Get performance metrics for a service endpoint (by **name**, plus optional `tier`) |
 
 ### Infrastructure
 
@@ -298,13 +298,15 @@ src/
     ├── business-transactions.ts
     ├── bt-performance.ts
     ├── service-endpoints.ts
+    ├── service-endpoint-paths.ts # pure SEP metric-tree paths + matching
     ├── tiers-nodes.ts
     ├── backends.ts
     ├── snapshots.ts
     ├── errors.ts
     ├── metrics.ts             # browse + query with rollup
     ├── dashboards.ts          # full CRUD + auto-build + HealthListWidget scoping
-    └── root-cause.ts
+    ├── root-cause.ts
+    └── root-cause-analysis.ts # pure correlation, scoring, narration
 ```
 
 ## Development
@@ -319,7 +321,8 @@ npm run build
 # Run built version
 npm start
 
-# Unit tests — payload builders vs. ground-truth fixtures, plus time-range
+# Unit tests — payload builders and root-cause analysis vs. ground-truth
+# fixtures, plus SEP metric paths, application resolution, time-range
 # resolution, response truncation, token caching, bounded concurrency,
 # and error handling
 npm test
@@ -329,6 +332,11 @@ npm test
 # Requires APPD_* env vars.
 node scripts/verify-dashboard-fixes.mjs
 ```
+
+CI runs the typecheck, the unit tests, and a server-startup smoke check on every
+push and pull request, plus a gitleaks secret scan over the full history.
+See `.github/workflows/ci.yml`.
+
 
 ## Authentication
 

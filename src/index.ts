@@ -7,18 +7,24 @@
  *
  * Provides tools for:
  *  - Application discovery and monitoring
- *  - Health rule management and violation tracking
- *  - Business transaction performance analysis
+ *  - Health rule CRUD, violation tracking, and anomaly detection
+ *  - Business transaction and service endpoint performance analysis
  *  - Infrastructure topology (tiers, nodes, backends)
  *  - Transaction snapshots and error diagnostics
+ *  - Automated root cause analysis (appd_diagnose_issue)
  *  - Metric browsing and querying
- *  - Anomaly detection
- *  - Dashboard CRUD (list, get, create, update, clone, delete, export)
- *  - Service endpoint monitoring
+ *  - Dashboard CRUD plus auto-build, import/export, and file save
  */
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+// Single source of truth for the version — resolves to the project package.json
+// from both src/ (tsx) and dist/ (built).
+const { version } = createRequire(import.meta.url)("../package.json") as {
+  version: string;
+};
 
 // Tool registrations
 import { registerApplicationTools } from "./tools/applications.js";
@@ -40,7 +46,7 @@ import { registerRootCauseTools } from "./tools/root-cause.js";
 
 const server = new McpServer({
   name: "appdynamics-mcp-server",
-  version: "2.0.0",
+  version,
 });
 
 // ── Register All Tools ───────────────────────────────────────────────────────
@@ -78,7 +84,7 @@ registerDashboardTools(server);
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("AppDynamics MCP Server v2.0.0 running via stdio");
+  console.error(`AppDynamics MCP Server v${version} running via stdio`);
 }
 
 main().catch((error) => {
