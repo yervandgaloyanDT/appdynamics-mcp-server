@@ -1,0 +1,15 @@
+{
+  "_comment": "Captured live from GET /controller/rest/applications/52210/metrics on experience.saas.appdynamics.com (Java-App2). Ground truth for the Service Endpoints subtree layout: tier folders, then endpoint folders, then metric leaves.",
+  "serviceEndpointsRoot": [
+    { "name": "Inventory", "type": "folder" },
+    { "name": "FrontEnd", "type": "folder" },
+    { "name": "OrderProcessing", "type": "folder" }
+  ],
+  "tierInventory": [{ "name": "/http/to2nd", "type": "folder" }],
+  "endpointHttpTo2nd": [
+    { "name": "Calls per Minute", "type": "leaf" },
+    { "name": "Errors per Minute", "type": "leaf" },
+    { "name": "Average Response Time (ms)", "type": "leaf" },
+    { "name": "Individual Nodes", "type": "folder" }
+  ]
+}
