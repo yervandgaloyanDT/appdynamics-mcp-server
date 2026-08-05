@@ -21,26 +21,22 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      # Fails on any type error; the build itself is just tsc.
       - name: Typecheck
         run: npx tsc --noEmit
 
       - name: Unit tests
         run: npm test
 
-      # Catches a broken entry point that typechecks but cannot start —
-      # the server must come up on stdio without a controller to talk to.
+      - name: Build
+        run: npm run build
+
+      # Catches an entry point that compiles but cannot boot; no unit test
+      # imports src/index.ts.
       - name: Server starts
-        run: npm run build && node -e "
-          const { spawn } = require('child_process');
-          const p = spawn(process.execPath, ['dist/index.js'], { stdio: ['pipe','pipe','pipe'] });
-          let err = '';
-          p.stderr.on('data', d => { err += d; if (err.includes('running via stdio')) { p.kill(); process.exit(0); } });
-          p.on('exit', c => { console.error('exited early:', c, err); process.exit(1); });
-          setTimeout(() => { console.error('no startup banner:', err); p.kill(); process.exit(1); }, 20000);
-          "
+        run: node test/smoke/start-server.mjs
 
   secret-scan:
     name: Secret scan
