@@ -14,8 +14,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
-RUN adduser -D -u 1000 appuser
-USER appuser
+# node:alpine already ships a `node` user with uid 1000
+USER node
 EXPOSE 8080
 # TRANSPORT is set via ConfigMap (http in k8s, stdio for local dev)
 ENTRYPOINT ["node", "dist/index.js"]
