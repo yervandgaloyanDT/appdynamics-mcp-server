@@ -46,40 +46,44 @@ import { registerRootCauseTools } from "./tools/root-cause.js";
 
 // ── Server Setup ─────────────────────────────────────────────────────────────
 
-const server = new McpServer({
-  name: "appdynamics-mcp-server",
-  version,
-});
+function buildServer(): McpServer {
+  const server = new McpServer({
+    name: "appdynamics-mcp-server",
+    version,
+  });
 
-// ── Register All Tools ───────────────────────────────────────────────────────
+  // ── Register All Tools ─────────────────────────────────────────────────────
 
-// Discovery & overview
-registerApplicationTools(server);
+  // Discovery & overview
+  registerApplicationTools(server);
 
-// Health monitoring
-registerHealthRuleTools(server);
-registerHealthViolationTools(server);
-registerAnomalyTools(server);
+  // Health monitoring
+  registerHealthRuleTools(server);
+  registerHealthViolationTools(server);
+  registerAnomalyTools(server);
 
-// Application performance
-registerBusinessTransactionTools(server);
-registerBtPerformanceTools(server);
-registerServiceEndpointTools(server);
+  // Application performance
+  registerBusinessTransactionTools(server);
+  registerBtPerformanceTools(server);
+  registerServiceEndpointTools(server);
 
-// Infrastructure
-registerTiersNodesTools(server);
-registerBackendTools(server);
+  // Infrastructure
+  registerTiersNodesTools(server);
+  registerBackendTools(server);
 
-// Diagnostics
-registerSnapshotTools(server);
-registerErrorTools(server);
-registerRootCauseTools(server);
+  // Diagnostics
+  registerSnapshotTools(server);
+  registerErrorTools(server);
+  registerRootCauseTools(server);
 
-// Metrics
-registerMetricTools(server);
+  // Metrics
+  registerMetricTools(server);
 
-// Dashboards
-registerDashboardTools(server);
+  // Dashboards
+  registerDashboardTools(server);
+
+  return server;
+}
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
@@ -89,15 +93,13 @@ async function main(): Promise<void> {
     return;
   }
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await buildServer().connect(transport);
   console.error(`AppDynamics MCP Server v${version} running via stdio`);
 }
 
 async function serveHttp(): Promise<void> {
   const port = Number(process.env.PORT ?? 8080);
   const path = process.env.MCP_PATH ?? "/mcp";
-
-  let transport: StreamableHTTPServerTransport | undefined;
 
   const httpServer = http.createServer((req, res) => {
     if (req.method === "GET" && req.url === "/healthz") {
@@ -118,13 +120,28 @@ async function serveHttp(): Promise<void> {
       res.end("Not Found");
       return;
     }
-    if (!transport) {
-      transport = new StreamableHTTPServerTransport({
-        enableJsonResponse: true,
-      });
+    // Stateless: a fresh McpServer + transport per request (SDK pattern).
+    const server = buildServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+    res.on("close", () => {
+      void transport.close();
+      void server.close();
+    });
+    try {
       await server.connect(transport);
+      await transport.handleRequest(req, res);
+    } catch (error) {
+      console.error("Error handling MCP request:", error);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+      }
+      if (!res.writableEnded) {
+        res.end("Internal Server Error");
+      }
     }
-    await transport.handleRequest(req, res);
   }
 
   await new Promise<void>((resolve) => httpServer.listen(port, "0.0.0.0", resolve));
