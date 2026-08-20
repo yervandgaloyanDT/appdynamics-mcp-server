@@ -17,8 +17,10 @@
  */
 
 import { createRequire } from "node:module";
+import http from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 // Single source of truth for the version — resolves to the project package.json
 // from both src/ (tsx) and dist/ (built).
@@ -82,9 +84,53 @@ registerDashboardTools(server);
 // ── Start ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  if ((process.env.TRANSPORT ?? "stdio") === "http") {
+    await serveHttp();
+    return;
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`AppDynamics MCP Server v${version} running via stdio`);
+}
+
+async function serveHttp(): Promise<void> {
+  const port = Number(process.env.PORT ?? 8080);
+  const path = process.env.MCP_PATH ?? "/mcp";
+
+  let transport: StreamableHTTPServerTransport | undefined;
+
+  const httpServer = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/healthz") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+    void handleApiRequest(req, res);
+  });
+
+  async function handleApiRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    if (url.pathname !== path) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not Found");
+      return;
+    }
+    if (!transport) {
+      transport = new StreamableHTTPServerTransport({
+        enableJsonResponse: true,
+      });
+      await server.connect(transport);
+    }
+    await transport.handleRequest(req, res);
+  }
+
+  await new Promise<void>((resolve) => httpServer.listen(port, "0.0.0.0", resolve));
+  console.error(
+    `AppDynamics MCP Server v${version} running via HTTP at http://0.0.0.0:${port}${path}`
+  );
 }
 
 main().catch((error) => {
